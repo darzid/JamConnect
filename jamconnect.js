@@ -17,6 +17,8 @@ const START_DELAY = 0.08;
 const OLD_SYNC = flags["oldsync"] && parseInt(flags["oldsync"] == 1) ? true : false;
 const DISABLE_HEARTBEAT = !OLD_SYNC ? true : false;
 
+console.log("Loading jam connect");
+
 function generateRandomCode(length = 6, alphabet = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ') {
   const bytes = new Uint8Array(length);
   if (window.crypto && window.crypto.getRandomValues) {
