@@ -33,7 +33,7 @@ function generateRandomCode(length = 6, alphabet = '23456789ABCDEFGHJKLMNPQRSTUV
   return out;
 }
 
-export class JamConnector {
+class JamConnector {
   constructor(toneInstance, options = {}) {
     this.Tone = toneInstance;
     this.isHost = false;
@@ -941,7 +941,7 @@ const JamConnectActions = {
   StopJamTransport: "StopJamTransport"
 };
 
-export class JamConnectClient {
+class JamConnectClient {
   constructor(parentElement) {
     this._tone = Tone;
     this._connector = new JamConnector(this._tone);
@@ -1453,7 +1453,7 @@ export class JamConnectClient {
   }
 }
 
-export class JamAction {
+class JamAction {
   constructor(jamConnectClient, name) {
     this._client = jamConnectClient;
     this._name = name;
@@ -1494,7 +1494,7 @@ export class JamAction {
   _getStartPreventionReason() {}
 }
 
-export class InviteJamGuestAction extends JamAction {
+class InviteJamGuestAction extends JamAction {
   constructor(jamConnectClient) {
     super(jamConnectClient, JamConnectActions.InviteJamGuest);
   }
@@ -1527,7 +1527,7 @@ export class InviteJamGuestAction extends JamAction {
   }
 }
 
-export class JoinJamSessionAction extends JamAction {
+class JoinJamSessionAction extends JamAction {
   constructor(jamConnectClient) {
     super(jamConnectClient, JamConnectActions.JoinJamSession);
   }
@@ -1546,7 +1546,7 @@ export class JoinJamSessionAction extends JamAction {
   }
 }
 
-export class StartJamTransportAction extends JamAction {
+class StartJamTransportAction extends JamAction {
   constructor(jamConnectClient) {
     super(jamConnectClient, JamConnectActions.StartJamTransport);
   }
@@ -1568,7 +1568,7 @@ export class StartJamTransportAction extends JamAction {
   }
 }
 
-export class StopJamTransportAction extends JamAction {
+class StopJamTransportAction extends JamAction {
   constructor(jamConnectClient) {
     super(jamConnectClient, JamConnectActions.StopJamTransport);
   }
