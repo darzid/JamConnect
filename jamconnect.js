@@ -14,8 +14,6 @@ const PEER_PREFIX = 'jam-';
 const PING_INTERVAL = 500;
 const HEARTBEAT_INTERVAL = 1000;
 const START_DELAY = 0.08;
-const OLD_SYNC = flags["oldsync"] && parseInt(flags["oldsync"] == 1) ? true : false;
-const DISABLE_HEARTBEAT = !OLD_SYNC ? true : false;
 
 console.log("Loading jam connect");
 
@@ -34,7 +32,8 @@ function generateRandomCode(length = 6, alphabet = '23456789ABCDEFGHJKLMNPQRSTUV
 }
 
 class JamConnector {
-  constructor(toneInstance, options = {}) {
+  constructor(appName, toneInstance, options = {}) {
+    this.appName = appName;
     this.Tone = toneInstance;
     this.isHost = false;
     this.signalConfig = options.signalConfig || {}; // Optional custom PeerJS host/port/path
@@ -158,7 +157,7 @@ class JamConnector {
     this.disconnect();
     this.isHost = true;
 
-    this.sessionId = existingSessionId || `303-${generateRandomCode(4)}`;
+    this.sessionId = existingSessionId || `JAM-${generateRandomCode(4)}`;
     this.authToken = existingAuthToken || generateRandomCode(8, '23456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz');
     const fullPeerId = `${PEER_PREFIX}${this.sessionId}`;
 
@@ -240,10 +239,11 @@ class JamConnector {
     const peerId = conn.peer || ('guest_' + generateRandomCode(4));
     const metaToken = conn.metadata && conn.metadata.authToken;
     const guestName = (conn.metadata && conn.metadata.name) || `Jammer-${peerId.slice(-4)}`;
-
+    const guestAppName = (conn.metadata && conn.metadata.appName) || 'unknown';
     const peerRecord = {
       id: peerId,
       name: guestName,
+      appName: guestAppName,
       conn,
       authenticated: false,
       rtt: 0,
@@ -320,6 +320,7 @@ class JamConnector {
       peerId: id,
       permissions: this.permissions,
       snapshot,
+      hostAppName: this.appName,
       hostTime: performance.now(),
       hostAudioTime: this.Tone.now(),
       transportState: this.Tone.Transport.state,
@@ -388,7 +389,8 @@ class JamConnector {
           serialization: 'json',
           metadata: {
             authToken: this.authToken,
-            name: guestName || `Synth-${myGuestId.slice(-4)}`
+            name: guestName || `${this.appName}-${myGuestId.slice(-4)}`,
+            appName: this.appName
           }
         });
 
@@ -398,7 +400,8 @@ class JamConnector {
           this._sendTo(conn, {
             type: 'AUTH_HELLO',
             authToken: this.authToken,
-            name: guestName || `Synth-${myGuestId.slice(-4)}`
+            name: guestName || `${this.appName}-${myGuestId.slice(-4)}`,
+            appName: this.appName
           });
         });
 
@@ -512,6 +515,7 @@ class JamConnector {
         list.push({
           id: p.id,
           name: p.name,
+          appName: p.appName,
           rtt: Math.round(p.rtt || 0)
         });
       }
@@ -536,12 +540,12 @@ class JamConnector {
       }
     }, PING_INTERVAL);
 
-    if (!DISABLE_HEARTBEAT) {
+    /*
       // Send Transport phase/ticks heartbeat every 2 seconds while playing
       this._heartbeatInterval = setInterval(() => {
         this.resync();
       }, HEARTBEAT_INTERVAL);
-    }
+    */
   }
 
   _measureClockOffset(conn) {
@@ -638,7 +642,7 @@ class JamConnector {
       case 'PATTERN_FULL_UPDATE':
         if (!this.permissions.syncPattern) return;
         if (this.onPatternUpdated) {
-          this.onPatternUpdated(msg.pattern || null, msg.stepIndex, msg.stepData, msg.presetName);
+          this.onPatternUpdated(msg.appName, msg.pattern || null, msg.stepIndex, msg.stepData, msg.presetName);
         }
         if (this.isHost) {
           this.broadcast(msg, senderId);
@@ -845,34 +849,38 @@ class JamConnector {
     });
   }
 
-  sendPatternStepUpdate(stepIndex, stepData) {
+  sendPatternStepUpdate(appName, stepIndex, stepData) {
     this.broadcast({
       type: 'PATTERN_STEP_UPDATE',
+      appName: appName,
       stepIndex,
       stepData
     });
   }
 
-  sendFullPatternUpdate(pattern, presetName = null) {
+  sendFullPatternUpdate(appName, pattern, presetName = null) {
     this.broadcast({
       type: 'PATTERN_FULL_UPDATE',
+      appName: appName,
       pattern,
       presetName
     });
   }
 
-  sendDeviceParameterChange(param, value, normalizedValue = null) {
+  sendDeviceParameterChange(appName, param, value, normalizedValue = null) {
     this.broadcast({
       type: 'DEVICE_PARAMETER_CHANGE',
+      appName: appName,
       param,
       value,
       normalizedValue
     });
   }
 
-  sendMasterSettingUpdate(setting, value) {
+  sendMasterSettingUpdate(appName, setting, value) {
     this.broadcast({
       type: 'MASTER_SETTING_UPDATE',
+      appName: appName,
       setting,
       value
     });
@@ -942,9 +950,9 @@ const JamConnectActions = {
 };
 
 class JamConnectClient {
-  constructor(parentElement) {
+  constructor(appName, parentElement) {
     this._tone = Tone;
-    this._connector = new JamConnector(this._tone);
+    this._connector = new JamConnector(appName, this._tone);
     this._parentElement = parentElement;
     this._userRole = null;
     this._isPlaying = false;
