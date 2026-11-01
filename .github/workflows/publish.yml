@@ -1,4 +1,4 @@
-name: Build and publish merged Acid303 page
+name: Build and publish JamConnect page
 
 on:
   push:
