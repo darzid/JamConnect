@@ -427,7 +427,7 @@ class JamConnector {
               if (this.onPermissionsUpdated) this.onPermissionsUpdated(this.permissions);
             }
             if (msg.snapshot && this.applyFullStateSnapshot) {
-              this.applyFullStateSnapshot(msg.snapshot);
+              this.applyFullStateSnapshot(msg.appName, msg.snapshot);
             }
             this._applyTransportSync(msg);
             this._emitConnectionState('connected', `Connected to ${this.sessionId}`);
@@ -621,7 +621,7 @@ class JamConnector {
 
       case 'FULL_STATE_SYNC':
         if (msg.snapshot && this.applyFullStateSnapshot) {
-          this.applyFullStateSnapshot(msg.snapshot);
+          this.applyFullStateSnapshot(msg.appName, msg.snapshot);
         }
         if (this.isHost) this.broadcast(msg, senderId);
         break;
@@ -653,7 +653,7 @@ class JamConnector {
         if (!this.permissions.syncDeviceParameterChange) return;
         
         if (this.onDeviceParameterChanged) {
-          this.onDeviceParameterChanged(msg.param, msg.value, msg.normalizedValue);
+          this.onDeviceParameterChanged(msg.appName, msg.param, msg.value, msg.normalizedValue);
         }
         if (this.isHost) {
           this.broadcast(msg, senderId);
@@ -663,7 +663,7 @@ class JamConnector {
       case 'MASTER_SETTING_UPDATE':
         if (!this.permissions.syncMasterSettings) return;
         if (this.onMasterSettingUpdated) {
-          this.onMasterSettingUpdated(msg.setting, msg.value);
+          this.onMasterSettingUpdated(msg.appName, msg.setting, msg.value);
         }
         if (this.isHost) {
           this.broadcast(msg, senderId);
@@ -675,7 +675,7 @@ class JamConnector {
         if (this.onPadTriggered) {
           const delaySec = Math.max(0, (msg.delayFromSendMs || 20) - (this.rtt / 2)) / 1000;
           const playTime = this.Tone.now() + delaySec;
-          this.onPadTriggered(msg.instrument, msg.note, msg.velocity, playTime, msg.extra);
+          this.onPadTriggered(msg.appName, msg.instrument, msg.note, msg.velocity, playTime, msg.extra);
         }
         if (this.isHost) {
           this.broadcast(msg, senderId);
@@ -685,7 +685,7 @@ class JamConnector {
       case 'MIDI_EVENT':
         if (!this.permissions.syncMidi) return;
         if (this.onMidiMessage) {
-          this.onMidiMessage(msg.event);
+          this.onMidiMessage(msg.appName, msg.event);
         }
         if (this.isHost) {
           this.broadcast(msg, senderId);
@@ -928,6 +928,7 @@ class JamConnector {
 
     this.broadcast({
       type: 'PAD_PLAY',
+      appName: this.appName,
       instrument,
       note,
       velocity,
