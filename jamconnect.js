@@ -849,38 +849,38 @@ class JamConnector {
     });
   }
 
-  sendPatternStepUpdate(appName, stepIndex, stepData) {
+  sendPatternStepUpdate(stepIndex, stepData) {
     this.broadcast({
       type: 'PATTERN_STEP_UPDATE',
-      appName: appName,
+      appName: this.appName,
       stepIndex,
       stepData
     });
   }
 
-  sendFullPatternUpdate(appName, pattern, presetName = null) {
+  sendFullPatternUpdate(pattern, presetName = null) {
     this.broadcast({
       type: 'PATTERN_FULL_UPDATE',
-      appName: appName,
+      appName: this.appName,
       pattern,
       presetName
     });
   }
 
-  sendDeviceParameterChange(appName, param, value, normalizedValue = null) {
+  sendDeviceParameterChange(param, value, normalizedValue = null) {
     this.broadcast({
       type: 'DEVICE_PARAMETER_CHANGE',
-      appName: appName,
+      appName: this.appName,
       param,
       value,
       normalizedValue
     });
   }
 
-  sendMasterSettingUpdate(appName, setting, value) {
+  sendMasterSettingUpdate(setting, value) {
     this.broadcast({
       type: 'MASTER_SETTING_UPDATE',
-      appName: appName,
+      appName: this.appName,
       setting,
       value
     });
