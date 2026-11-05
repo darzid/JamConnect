@@ -38,6 +38,7 @@ class JamConnector {
     this.isHost = false;
     this.signalConfig = options.signalConfig || {}; // Optional custom PeerJS host/port/path
     this.enableLogging = options.enableLogging || false;
+    console.log("JamConnector: Logging = " + this.enableLogging);
     
     // Session credentials (only thing needed in QR code / URL link)
     this.sessionId = null;
