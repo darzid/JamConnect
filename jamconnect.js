@@ -905,7 +905,7 @@ class JamConnector {
   /**
    * Triggers a 303 note or drum pad with optional 16th-note quantization.
    */
-  triggerPad(instrument, note = 'C2', velocity = 0.85, snapStrength = 0.5, extra = {}) {
+  triggerPad(appName, instrument, note = 'C2', velocity = 0.85, snapStrength = 0, extra = {}) {
     const now = this.Tone.now();
     const bpm = this.Tone.Transport.bpm.value;
     const sixteenthDuration = (60 / bpm) / 4;
