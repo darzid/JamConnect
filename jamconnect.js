@@ -758,6 +758,9 @@ class JamConnector {
   }
 
   broadcast(obj, excludePeerId = null) {
+    if (this.enableLogging) {
+      console.log("JamConnector.broadcast: obj, excludePeerId", obj, excludePeerId);
+    }
     if (this.isHost) {
       for (const [id, peer] of this.peers.entries()) {
         if (id !== excludePeerId && peer.authenticated && peer.conn && peer.conn.open) {
