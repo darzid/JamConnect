@@ -37,7 +37,8 @@ class JamConnector {
     this.Tone = toneInstance;
     this.isHost = false;
     this.signalConfig = options.signalConfig || {}; // Optional custom PeerJS host/port/path
-
+    this.enableLogging = options.enableLogging || false;
+    
     // Session credentials (only thing needed in QR code / URL link)
     this.sessionId = null;
     this.authToken = null;
@@ -565,7 +566,9 @@ class JamConnector {
 
   _routeMessage(msg, senderId) {
     if (!msg || !msg.type) return;
-
+    if (this.enableLogging) {
+      console.log("JamConnector.routeMessage: msg, senderId", msg, senderId);
+    }
     switch (msg.type) {
       case 'PING':
         if (this.hostConn && this.hostConn.open) {
@@ -743,6 +746,9 @@ class JamConnector {
   _sendTo(conn, obj) {
     if (conn && conn.open) {
       try {
+        if (this.enableLogging) {
+          console.log("JamConnector.sendTo: conn, obj", conn, obj);
+        }
         conn.send(obj);
       } catch (err) {
         console.warn('[JamConnector Send Error]', err);
