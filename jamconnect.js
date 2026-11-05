@@ -958,9 +958,9 @@ const JamConnectActions = {
 };
 
 class JamConnectClient {
-  constructor(appName, parentElement) {
+  constructor(appName, parentElement, enableLogging = false) {
     this._tone = Tone;
-    this._connector = new JamConnector(appName, this._tone);
+    this._connector = new JamConnector(appName, this._tone, {enableLogging: enableLogging});
     this._parentElement = parentElement;
     this._userRole = null;
     this._isPlaying = false;
