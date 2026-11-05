@@ -13,7 +13,7 @@ const DEFAULT_ICE_SERVERS = [
 const PEER_PREFIX = 'jam-';
 const PING_INTERVAL = 500;
 const HEARTBEAT_INTERVAL = 1000;
-const START_DELAY = 0.08;
+const START_DELAY = 0.015;
 
 console.log("Loading jam connect");
 
