@@ -74,6 +74,7 @@ class JamConnector {
     this.onAuthError = null;           // (reason)
     this.onPadTriggered = null;        // (instrument, note, velocity, scheduledTime, extra)
     this.onPatternUpdated = null;      // (pattern, stepIndex, stepData)
+    this.onPatternStepUpdated = null;  
     this.onDeviceParameterChanged = null;   // (paramName, value, rawParams)
     this.onMasterSettingUpdated = null;  // (settingName, value)
     this.onMidiMessage = null;         // (midiEvent)
@@ -643,10 +644,18 @@ class JamConnector {
         break;
 
       case 'PATTERN_STEP_UPDATE':
+        if (!this.permissions.syncPattern) return;
+        if (this.onPatternStepUpdated) {
+          this.onPatternStepUpdated(msg.appName, msg.instrument, msg.stepIndex, msg.stepData);
+        }
+        if (this.isHost) {
+          this.broadcast(msg, senderId);
+        }
+        break;
       case 'PATTERN_FULL_UPDATE':
         if (!this.permissions.syncPattern) return;
         if (this.onPatternUpdated) {
-          this.onPatternUpdated(msg.appName, msg.instrument, msg.pattern || null, msg.stepIndex, msg.stepData, msg.presetName);
+          this.onPatternUpdated(msg.appName, msg.instrument, msg.pattern, msg.presetName);
         }
         if (this.isHost) {
           this.broadcast(msg, senderId);
