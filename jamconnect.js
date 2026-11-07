@@ -646,7 +646,7 @@ class JamConnector {
       case 'PATTERN_FULL_UPDATE':
         if (!this.permissions.syncPattern) return;
         if (this.onPatternUpdated) {
-          this.onPatternUpdated(msg.appName, msg.pattern || null, msg.stepIndex, msg.stepData, msg.presetName);
+          this.onPatternUpdated(msg.appName, msg.instrument, msg.pattern || null, msg.stepIndex, msg.stepData, msg.presetName);
         }
         if (this.isHost) {
           this.broadcast(msg, senderId);
@@ -859,19 +859,21 @@ class JamConnector {
     });
   }
 
-  sendPatternStepUpdate(stepIndex, stepData) {
+  sendPatternStepUpdate(instrument, stepIndex, stepData) {
     this.broadcast({
       type: 'PATTERN_STEP_UPDATE',
       appName: this.appName,
+      instrument,
       stepIndex,
       stepData
     });
   }
 
-  sendFullPatternUpdate(pattern, presetName = null) {
+  sendFullPatternUpdate(instrument, pattern, presetName = null) {
     this.broadcast({
       type: 'PATTERN_FULL_UPDATE',
       appName: this.appName,
+      instrument,
       pattern,
       presetName
     });
