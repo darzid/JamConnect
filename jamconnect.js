@@ -666,6 +666,8 @@ class JamConnector {
         if (!this.permissions.syncDeviceParameterChange) return;
         
         if (this.onDeviceParameterChanged) {
+          if (this.enableLogging)
+            console.log("onDeviceParameterChanged " + msg.param, msg.value);
           this.onDeviceParameterChanged(msg.appName, msg.param, msg.value, msg.normalizedValue);
         }
         if (this.isHost) {
@@ -756,9 +758,6 @@ class JamConnector {
   _sendTo(conn, obj) {
     if (conn && conn.open) {
       try {
-        if (this.enableLogging) {
-          console.log("JamConnector.sendTo: conn, obj", conn, obj);
-        }
         conn.send(obj);
       } catch (err) {
         console.warn('[JamConnector Send Error]', err);
@@ -869,6 +868,9 @@ class JamConnector {
   }
 
   sendPatternStepUpdate(instrument, stepIndex, stepData) {
+    if (this.enableLogging) {
+      console.log("sendPatternStepUpdate", instrument, stepIndex, stepData);
+    }
     this.broadcast({
       type: 'PATTERN_STEP_UPDATE',
       appName: this.appName,
@@ -879,6 +881,9 @@ class JamConnector {
   }
 
   sendFullPatternUpdate(instrument, pattern, presetName = null) {
+    if (this.enableLogging) {
+      console.log("sendFullPatternUpdate", instrument, pattern, presetName);
+    }
     this.broadcast({
       type: 'PATTERN_FULL_UPDATE',
       appName: this.appName,
@@ -889,6 +894,9 @@ class JamConnector {
   }
 
   sendDeviceParameterChange(param, value, normalizedValue = null) {
+    if (this.enableLogging) {
+      console.log("sendDeviceParameterChange", param, value, normalizedValue);
+    }
     this.broadcast({
       type: 'DEVICE_PARAMETER_CHANGE',
       appName: this.appName,
@@ -899,6 +907,9 @@ class JamConnector {
   }
 
   sendMasterSettingUpdate(setting, value) {
+    if (this.enableLogging) {
+      console.log("sendMasterSettingUpdate", setting, value);
+    }
     this.broadcast({
       type: 'MASTER_SETTING_UPDATE',
       appName: this.appName,
