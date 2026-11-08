@@ -16,6 +16,131 @@ const HEARTBEAT_INTERVAL = 10000;
 const START_DELAY = 0.015;
 const PARAM_CHANGE_BUFFER_TIME = 0;
 
+const JAM_MESSAGE_TYPES = new Set([
+  'AUTH_HELLO', 'AUTH_OK', 'AUTH_REJECTED', 'PING', 'PONG', 'CLOCK_SYNC', 'PEER_LIST',
+  'PERMISSIONS_UPDATE', 'FULL_STATE_SYNC', 'TRANSPORT_STATE', 'TRANSPORT_HEARTBEAT',
+  'PATTERN_STEP_UPDATE', 'PATTERN_FULL_UPDATE', 'DEVICE_PARAMETER_CHANGE', 'DEVICE_PARAMETER_CHANGES',
+  'MASTER_SETTING_UPDATE', 'PAD_PLAY', 'MIDI_EVENT'
+]);
+
+// Messages only the host may send; guests accept them only from the host connection
+const JAM_HOST_ONLY_TYPES = new Set(['PING', 'CLOCK_SYNC', 'PEER_LIST', 'PERMISSIONS_UPDATE', 'TRANSPORT_HEARTBEAT']);
+
+// Accepted [min, max] for incoming numeric fields. Non-finite values are rejected, others clamped.
+const JAM_MESSAGE_LIMITS = {
+  bpm: [20, 400],
+  swing: [0, 1],
+  velocity: [0, 1],
+  normalizedValue: [0, 1],
+  seconds: [0, Infinity],
+  ticks: [0, Infinity],
+  delaySec: [0, 10],
+  delayFromSendMs: [0, 10000],
+  rtt: [0, 60000],
+  timeOffset: [-Infinity, Infinity],
+  hostTime: [-Infinity, Infinity],
+  hostAudioTime: [-Infinity, Infinity],
+  hostSendTime: [-Infinity, Infinity],
+  guestReceiveTime: [-Infinity, Infinity]
+};
+const JAM_MAX_STRING_LENGTH = 256;
+const JAM_MAX_NAME_LENGTH = 64;
+const JAM_MAX_BATCH_SIZE = 512;
+
+function jamCleanName(name, fallback) {
+  const clean = typeof name === 'string' ? name.trim().slice(0, JAM_MAX_NAME_LENGTH) : '';
+  return clean || fallback;
+}
+
+function jamSanitizePermissions(permissions) {
+  if (!permissions || typeof permissions !== 'object' || Array.isArray(permissions)) return null;
+  const out = {};
+  for (const [key, value] of Object.entries(permissions)) {
+    if (typeof value === 'boolean') out[key] = value;
+  }
+  return out;
+}
+
+function jamIsValidValue(value) {
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (typeof value === 'string') return value.length <= JAM_MAX_STRING_LENGTH;
+  return true;
+}
+
+function jamClamp(value, [min, max]) {
+  return Math.min(max, Math.max(min, value));
+}
+
+/**
+ * Checks the shape of an incoming message and clamps its numeric fields in place.
+ * Returns null if the message is acceptable, otherwise the reason it must be dropped.
+ */
+function validateJamMessage(msg) {
+  if (!msg || typeof msg !== 'object' || Array.isArray(msg)) return 'not an object';
+  if (typeof msg.type !== 'string' || !JAM_MESSAGE_TYPES.has(msg.type)) return 'unknown type';
+
+  for (const [key, range] of Object.entries(JAM_MESSAGE_LIMITS)) {
+    if (msg[key] === undefined || msg[key] === null) continue;
+    if (typeof msg[key] !== 'number' || !Number.isFinite(msg[key])) return `invalid ${key}`;
+    msg[key] = jamClamp(msg[key], range);
+  }
+  if (msg.appName !== undefined && msg.appName !== null) {
+    if (typeof msg.appName !== 'string') return 'invalid appName';
+    msg.appName = msg.appName.slice(0, JAM_MAX_STRING_LENGTH);
+  }
+  const isNum = (key) => typeof msg[key] === 'number';
+  const isStr = (key) => typeof msg[key] === 'string' && msg[key].length <= JAM_MAX_STRING_LENGTH;
+
+  switch (msg.type) {
+    case 'AUTH_HELLO':
+      if (!isStr('authToken')) return 'invalid authToken';
+      break;
+    case 'AUTH_OK':
+      if (msg.permissions !== undefined && !(msg.permissions = jamSanitizePermissions(msg.permissions))) return 'invalid permissions';
+      if (msg.transportState !== undefined && !isStr('transportState')) return 'invalid transportState';
+      break;
+    case 'PING':
+      if (!isNum('hostSendTime')) return 'missing hostSendTime';
+      break;
+    case 'PONG':
+      if (!isNum('hostSendTime') || !isNum('guestReceiveTime')) return 'missing times';
+      break;
+    case 'CLOCK_SYNC':
+      if (!isNum('rtt') || !isNum('timeOffset')) return 'missing rtt/timeOffset';
+      break;
+    case 'PEER_LIST':
+      if (!Array.isArray(msg.peers) || msg.peers.length > JAM_MAX_BATCH_SIZE) return 'invalid peers';
+      if (!msg.peers.every(p => p && typeof p === 'object')) return 'invalid peers';
+      msg.peers = msg.peers.map(p => ({ ...p, name: jamCleanName(p.name, 'Jammer') }));
+      break;
+    case 'PERMISSIONS_UPDATE':
+      if (!(msg.permissions = jamSanitizePermissions(msg.permissions))) return 'invalid permissions';
+      break;
+    case 'TRANSPORT_STATE':
+      if (!isStr('state')) return 'invalid state';
+      break;
+    case 'DEVICE_PARAMETER_CHANGE':
+      if (!isStr('param') || !jamIsValidValue(msg.value)) return 'invalid parameter change';
+      break;
+    case 'DEVICE_PARAMETER_CHANGES':
+      if (!Array.isArray(msg.changes) || msg.changes.length === 0 || msg.changes.length > JAM_MAX_BATCH_SIZE) return 'invalid changes';
+      for (const change of msg.changes) {
+        if (!change || typeof change !== 'object' || typeof change.param !== 'string' ||
+            change.param.length > JAM_MAX_STRING_LENGTH || !jamIsValidValue(change.value)) return 'invalid change';
+        if (change.normalizedValue !== undefined && change.normalizedValue !== null) {
+          if (typeof change.normalizedValue !== 'number' || !Number.isFinite(change.normalizedValue)) return 'invalid change';
+          change.normalizedValue = jamClamp(change.normalizedValue, JAM_MESSAGE_LIMITS.normalizedValue);
+        }
+      }
+      break;
+    case 'MASTER_SETTING_UPDATE':
+      if (!isStr('setting') || !jamIsValidValue(msg.value)) return 'invalid setting';
+      if (msg.setting === 'bpm' && isNum('value')) msg.value = jamClamp(msg.value, JAM_MESSAGE_LIMITS.bpm);
+      break;
+  }
+  return null;
+}
+
 function generateRandomCode(length = 6, alphabet = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ') {
   const bytes = new Uint8Array(length);
   if (window.crypto && window.crypto.getRandomValues) {
@@ -244,8 +369,8 @@ class JamConnector {
   _handleIncomingGuestConnection(conn) {
     const peerId = conn.peer || ('guest_' + generateRandomCode(4));
     const metaToken = conn.metadata && conn.metadata.authToken;
-    const guestName = (conn.metadata && conn.metadata.name) || `Jammer-${peerId.slice(-4)}`;
-    const guestAppName = (conn.metadata && conn.metadata.appName) || 'unknown';
+    const guestName = jamCleanName(conn.metadata && conn.metadata.name, `Jammer-${peerId.slice(-4)}`);
+    const guestAppName = jamCleanName(conn.metadata && conn.metadata.appName, 'unknown');
     const peerRecord = {
       id: peerId,
       name: guestName,
@@ -282,11 +407,11 @@ class JamConnector {
     });
 
     conn.on('data', (raw) => {
-      const msg = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      const msg = this._parseIncoming(raw, peerId);
       if (!peerRecord.authenticated) {
         if (msg && msg.type === 'AUTH_HELLO' && msg.authToken === this.authToken) {
           peerRecord.authenticated = true;
-          if (msg.name) peerRecord.name = msg.name;
+          if (msg.name) peerRecord.name = jamCleanName(msg.name, peerRecord.name);
           clearTimeout(authTimeout);
           this._completeGuestAuth(peerRecord);
         } else {
@@ -297,7 +422,7 @@ class JamConnector {
         }
         return;
       }
-      this._routeMessage(msg, peerId);
+      if (msg) this._routeMessage(msg, peerId);
     });
 
     const cleanup = () => {
@@ -412,7 +537,8 @@ class JamConnector {
         });
 
         conn.on('data', (raw) => {
-          const msg = typeof raw === 'string' ? JSON.parse(raw) : raw;
+          const msg = this._parseIncoming(raw, 'HOST');
+          if (!msg) return;
 
           if (msg.type === 'AUTH_REJECTED') {
             clearTimeout(connectTimeout);
@@ -572,9 +698,34 @@ class JamConnector {
     });
   }
 
+  _parseIncoming(raw, senderId) {
+    let msg = raw;
+    if (typeof raw === 'string') {
+      try {
+        msg = JSON.parse(raw);
+      } catch (_) {
+        msg = null;
+      }
+    }
+    const error = validateJamMessage(msg);
+    if (error) {
+      this.logger.warn(`[JamConnector] Dropping malformed message from ${senderId}: ${error}`);
+      return null;
+    }
+    return msg;
+  }
+
   _routeMessage(msg, senderId) {
     if (!msg || !msg.type) return;
-    
+
+    // Host -> guest control messages: the host never accepts them, guests only from the host connection
+    if (JAM_HOST_ONLY_TYPES.has(msg.type) && (this.isHost || senderId !== 'HOST')) {
+      this.logger.warn(`[JamConnector] Ignoring ${msg.type} from ${senderId}`);
+      return;
+    }
+    // On the host, every guest message is gated by the permission that covers it
+    if (this.isHost && senderId !== 'HOST' && !this._isGuestMessageAllowed(msg)) return;
+
     this.logger.log("_routeMessage, msg=" + msg, senderId);
     switch (msg.type) {
       case 'PING':
@@ -637,7 +788,6 @@ class JamConnector {
         break;
 
       case 'TRANSPORT_STATE':
-        if (this.isHost && !this.permissions.syncTransport && senderId !== 'HOST') return;
         this._applyTransportSync(msg);
         if (this.isHost) {
           this.broadcast(msg, senderId);
@@ -724,6 +874,32 @@ class JamConnector {
           this.broadcast(msg, senderId);
         }
         break;
+    }
+  }
+
+  _isGuestMessageAllowed(msg) {
+    const p = this.permissions;
+    switch (msg.type) {
+      case 'AUTH_HELLO':
+      case 'PONG':
+        return true;
+      case 'TRANSPORT_STATE':
+        return msg.state === 'bpmchanged' ? !!p.syncMasterSettings : !!p.syncTransport;
+      case 'FULL_STATE_SYNC':
+        return !!(p.syncPattern && p.syncDeviceParameterChange && p.syncMasterSettings);
+      case 'PATTERN_STEP_UPDATE':
+      case 'PATTERN_FULL_UPDATE':
+        return !!p.syncPattern;
+      case 'DEVICE_PARAMETER_CHANGE':
+      case 'DEVICE_PARAMETER_CHANGES':
+        return !!p.syncDeviceParameterChange;
+      case 'MASTER_SETTING_UPDATE':
+        return !!p.syncMasterSettings;
+      case 'PAD_PLAY':
+      case 'MIDI_EVENT':
+        return !!p.syncMidi;
+      default:
+        return false;
     }
   }
 
