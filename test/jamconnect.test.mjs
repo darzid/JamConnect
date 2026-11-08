@@ -314,3 +314,85 @@ test('timing constants are exposed as overridable per-instance options', () => {
   const client = new env.JamConnectClient('Acid303', null, false, { timing: { paramBufferMs: 20 } });
   assert.equal(client.connector.timing.paramBufferMs, 20);
 });
+// ---------- 3. Parameter path ----------
+
+test('DEVICE_PARAMETER_CHANGES applies every change (and is relayed)', async () => {
+  const env = loadJamConnect();
+  const { host, guests: [a, b] } = await startSession(env, { guests: 2, permissions: { syncDeviceParameterChange: true } });
+  const onHost = [];
+  const onB = [];
+  host.onDeviceParameterChanged = (...args) => onHost.push(args);
+  b.onDeviceParameterChanged = (...args) => onB.push(args);
+
+  a.broadcast({ type: 'DEVICE_PARAMETER_CHANGES', appName: 'Acid303', changes: [
+    { param: 'cutoff', value: 800, normalizedValue: 0.4 },
+    { param: 'resonance', value: 12, normalizedValue: 0.6 },
+    { param: 'decay', value: 0.3, normalizedValue: null }
+  ] });
+  env.clock.advance(50);
+  const expected = [
+    ['Acid303', 'cutoff', 800, 0.4],
+    ['Acid303', 'resonance', 12, 0.6],
+    ['Acid303', 'decay', 0.3, null]
+  ];
+  assert.deepEqual(onHost, expected);
+  assert.deepEqual(onB, expected);
+});
+
+test('a burst inside the buffer window becomes exactly one batched message, never an empty one', async () => {
+  const env = loadJamConnect();
+  const { guests: [guest] } = await startSession(env, { permissions: { syncDeviceParameterChange: true }, guestOptions: { timing: { paramBufferMs: 30 } } });
+  const sent = () => guest.hostConn.sent.filter(m => m.type.startsWith('DEVICE_PARAMETER_CHANGE'));
+
+  for (let i = 0; i < 60; i++) {
+    guest.sendDeviceParameterChange(['cutoff', 'resonance', 'decay'][i % 3], i, i / 60);
+    env.clock.advance(0.4);
+  }
+  assert.equal(sent().length, 0, 'nothing is sent before the window ends');
+  env.clock.advance(30);
+  assert.equal(sent().length, 1);
+  const [batch] = sent();
+  assert.equal(batch.type, 'DEVICE_PARAMETER_CHANGES');
+  assert.deepEqual(JSON.parse(JSON.stringify(batch.changes.map(c => [c.param, c.value]))), [['cutoff', 57], ['resonance', 58], ['decay', 59]]);
+  assert.equal(batch.changes.find(c => c.param === 'decay').normalizedValue, 59 / 60);
+
+  env.clock.advance(500);
+  assert.equal(sent().length, 1, 'no further (empty) batches');
+  assert.ok(sent().every(m => m.type !== 'DEVICE_PARAMETER_CHANGES' || m.changes.length > 0));
+
+  // One parameter in a window is sent in the singular form old clients understand.
+  for (let i = 0; i < 10; i++) guest.sendDeviceParameterChange('cutoff', i, i / 10);
+  env.clock.advance(31);
+  assert.equal(sent().length, 2);
+  assert.deepEqual({ ...sent()[1] }, { type: 'DEVICE_PARAMETER_CHANGE', appName: 'Acid303', param: 'cutoff', value: 9, normalizedValue: 0.9 });
+});
+
+test('with the default window (0) every change is sent immediately, as before', async () => {
+  const env = loadJamConnect();
+  const { guests: [guest] } = await startSession(env, { permissions: { syncDeviceParameterChange: true } });
+  guest.sendDeviceParameterChange('cutoff', 1, 0.1);
+  guest.sendDeviceParameterChange('cutoff', 2, 0.2);
+  assert.deepEqual(received(guest.hostConn, 'DEVICE_PARAMETER_CHANGE').map(m => m.value), [1, 2]);
+});
+
+test('remotely applied changes are not echoed back', async () => {
+  const env = loadJamConnect();
+  const { host, guests: [guest] } = await startSession(env, { permissions: { syncDeviceParameterChange: true, syncPattern: true } });
+  // A typical app: applying a value moves the knob, whose handler sends the change again.
+  host.onDeviceParameterChanged = (app, param, value, normalized) => host.sendDeviceParameterChange(param, value, normalized);
+  host.onMasterSettingUpdated = (app, setting, value) => host.sendMasterSettingUpdate(setting, value);
+  host.onPatternStepUpdated = (app, instrument, step, data) => host.sendPatternStepUpdate(instrument, step, data);
+  const hostConnToGuest = host.peers.values().next().value.conn;
+  const before = hostConnToGuest.sent.length;
+
+  guest.sendDeviceParameterChange('cutoff', 5, 0.5);
+  guest.sendMasterSettingUpdate('delayWet', 0.3);
+  guest.sendPatternStepUpdate('bass', 2, { on: true });
+  env.clock.advance(50);
+  assert.equal(hostConnToGuest.sent.length, before, 'host sent nothing back to the originating guest');
+  assert.equal(host.isApplyingRemoteUpdate, false);
+
+  // Local changes still go out.
+  host.sendDeviceParameterChange('cutoff', 6, 0.6);
+  assert.equal(hostConnToGuest.sent.length, before + 1);
+});

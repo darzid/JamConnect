@@ -201,8 +201,10 @@ class JamConnector {
 
     this._pingInterval = null;
     this._heartbeatInterval = null;
-    this._paramChangeBuffer = [];
-    this._lastParamChangeTime = performance.now();
+    this._paramChangeBuffer = new Map(); // param -> latest change within the buffer window
+    this._paramFlushTimer = null;
+    // True while a remote change is being applied; send* calls made meanwhile are not echoed back
+    this.isApplyingRemoteUpdate = false;
     
     // Event listener callbacks
     this.onSessionCreated = null;      // ({ sessionId, authToken, inviteUrl })
@@ -570,7 +572,7 @@ class JamConnector {
               if (this.onPermissionsUpdated) this.onPermissionsUpdated(this.permissions);
             }
             if (msg.snapshot && this.applyFullStateSnapshot) {
-              this.applyFullStateSnapshot(msg.appName, msg.snapshot);
+              this._applyRemote(() => this.applyFullStateSnapshot(msg.appName, msg.snapshot));
             }
             this._applyTransportSync(msg);
             this._emitConnectionState('connected', `Connected to ${this.sessionId}`);
@@ -630,6 +632,11 @@ class JamConnector {
       clearInterval(this._heartbeatInterval);
       this._heartbeatInterval = null;
     }
+    if (this._paramFlushTimer) {
+      clearTimeout(this._paramFlushTimer);
+      this._paramFlushTimer = null;
+    }
+    this._paramChangeBuffer.clear();
 
     for (const peer of this.peers.values()) {
       try { peer.conn.close(); } catch (_) {}
@@ -793,7 +800,7 @@ class JamConnector {
 
       case 'FULL_STATE_SYNC':
         if (msg.snapshot && this.applyFullStateSnapshot) {
-          this.applyFullStateSnapshot(msg.appName, msg.snapshot);
+          this._applyRemote(() => this.applyFullStateSnapshot(msg.appName, msg.snapshot));
         }
         if (this.isHost) this.broadcast(msg, senderId);
         break;
@@ -812,7 +819,7 @@ class JamConnector {
       case 'PATTERN_STEP_UPDATE':
         if (!this.permissions.syncPattern) return;
         if (this.onPatternStepUpdated) {
-          this.onPatternStepUpdated(msg.appName, msg.instrument, msg.stepIndex, msg.stepData);
+          this._applyRemote(() => this.onPatternStepUpdated(msg.appName, msg.instrument, msg.stepIndex, msg.stepData));
         }
         if (this.isHost) {
           this.broadcast(msg, senderId);
@@ -821,7 +828,7 @@ class JamConnector {
       case 'PATTERN_FULL_UPDATE':
         if (!this.permissions.syncPattern) return;
         if (this.onPatternUpdated) {
-          this.onPatternUpdated(msg.appName, msg.instrument, msg.pattern, msg.presetName);
+          this._applyRemote(() => this.onPatternUpdated(msg.appName, msg.instrument, msg.pattern, msg.presetName));
         }
         if (this.isHost) {
           this.broadcast(msg, senderId);
@@ -833,7 +840,7 @@ class JamConnector {
         
         if (this.onDeviceParameterChanged) {
           this.logger.log("onDeviceParameterChanged, param=" + msg.param, msg.value);
-          this.onDeviceParameterChanged(msg.appName, msg.param, msg.value, msg.normalizedValue);
+          this._applyRemote(() => this.onDeviceParameterChanged(msg.appName, msg.param, msg.value, msg.normalizedValue));
         }
         if (this.isHost) {
           this.broadcast(msg, senderId);
@@ -845,8 +852,10 @@ class JamConnector {
         
         if (this.onDeviceParameterChanged) {
           this.logger.log("onDeviceParametersChanged, changes=" + msg.changes);
-          msg.changes.forEach(change => {
-            this.onDeviceParameterChanged(msg.appName, change.param, chamge.value);
+          this._applyRemote(() => {
+            msg.changes.forEach(change => {
+              this.onDeviceParameterChanged(msg.appName, change.param, change.value, change.normalizedValue);
+            });
           });
         }
         if (this.isHost) {
@@ -857,7 +866,7 @@ class JamConnector {
       case 'MASTER_SETTING_UPDATE':
         if (!this.permissions.syncMasterSettings) return;
         if (this.onMasterSettingUpdated) {
-          this.onMasterSettingUpdated(msg.appName, msg.setting, msg.value);
+          this._applyRemote(() => this.onMasterSettingUpdated(msg.appName, msg.setting, msg.value));
         }
         if (this.isHost) {
           this.broadcast(msg, senderId);
@@ -1061,6 +1070,7 @@ class JamConnector {
     if (!this.isHost && this.isConnectedToHost && !this.permissions.syncMasterSettings) return;
 
     this.Tone.Transport.bpm.value = bpm;
+    if (this.isApplyingRemoteUpdate) return;
     this.broadcast({
       type: 'TRANSPORT_STATE',
       state: 'bpmchanged',
@@ -1072,6 +1082,7 @@ class JamConnector {
   }
 
   sendPatternStepUpdate(instrument, stepIndex, stepData) {
+    if (this.isApplyingRemoteUpdate) return;
     this.logger.log("sendPatternStepUpdate, instrument, stepIndex, stepData", instrument, stepIndex, stepData);
     
     this.broadcast({
@@ -1084,6 +1095,7 @@ class JamConnector {
   }
 
   sendFullPatternUpdate(instrument, pattern, presetName = null) {
+    if (this.isApplyingRemoteUpdate) return;
     this.logger.log("sendFullPatternUpdate, instrument=" + instrument, pattern, presetName);
     
     this.broadcast({
@@ -1095,39 +1107,55 @@ class JamConnector {
     });
   }
 
+  /**
+   * Sends a parameter change. With timing.paramBufferMs > 0, changes made within one window
+   * are coalesced (last value per parameter wins) and sent as a single message when it ends.
+   */
   sendDeviceParameterChange(param, value, normalizedValue = null) {
-    
-    let delta = performance.now() - this._lastParamChangeTime;
-    if (delta < this.timing.paramBufferMs) {
-      this._paramChangeBuffer.push({param: param, value: value});
-      setTimeout(() => {
-        this.broadcast({
-          type: 'DEVICE_PARAMETER_CHANGES',
-          appName: this.appName,
-          changes: this._paramChangeBuffer
-        });
-        this.logger.log("sendDeviceParameterChange: sent buffer", this._paramChangeBuffer);
-        this._paramChangeBuffer = [];
-        
-      }, 30);
+    if (this.isApplyingRemoteUpdate) return;
+
+    this._paramChangeBuffer.delete(param); // keep insertion order = order of the latest change
+    this._paramChangeBuffer.set(param, { param, value, normalizedValue });
+    if (this._paramFlushTimer) {
       this.logger.log("sendDeviceParameterChange: buffered change");
+      return;
     }
-    else {
-      this.logger.log("sendDeviceParameterChange, param=" + param, value, normalizedValue);
-      this.broadcast({
-        type: 'DEVICE_PARAMETER_CHANGE',
-        appName: this.appName,
-        param,
-        value,
-        normalizedValue
-      });
+    if (this.timing.paramBufferMs > 0) {
+      this._paramFlushTimer = setTimeout(() => this._flushParameterChanges(), this.timing.paramBufferMs);
+    } else {
+      this._flushParameterChanges();
     }
-    
-    this._lastParamChangeTime = performance.now();
+  }
+
+  _flushParameterChanges() {
+    if (this._paramFlushTimer) {
+      clearTimeout(this._paramFlushTimer);
+      this._paramFlushTimer = null;
+    }
+    const changes = [...this._paramChangeBuffer.values()];
+    this._paramChangeBuffer.clear();
+    if (changes.length === 1) {
+      this.logger.log("sendDeviceParameterChange, param=" + changes[0].param, changes[0].value, changes[0].normalizedValue);
+      this.broadcast({ type: 'DEVICE_PARAMETER_CHANGE', appName: this.appName, ...changes[0] });
+    } else if (changes.length > 1) {
+      this.logger.log("sendDeviceParameterChange: sent buffer", changes);
+      this.broadcast({ type: 'DEVICE_PARAMETER_CHANGES', appName: this.appName, changes });
+    }
+  }
+
+  _applyRemote(fn) {
+    const previous = this.isApplyingRemoteUpdate;
+    this.isApplyingRemoteUpdate = true;
+    try {
+      fn();
+    } finally {
+      this.isApplyingRemoteUpdate = previous;
+    }
   }
 
   sendMasterSettingUpdate(setting, value) {
-    
+    if (this.isApplyingRemoteUpdate) return;
+
     this.logger.log("sendMasterSettingUpdate, setting=" + setting, value);
     
     this.broadcast({
@@ -1275,6 +1303,9 @@ class JamConnectClient {
 
   get tone() { return this._tone; }
   get connector() { return this._connector; }
+  // Shared with the connector, which sets it while applying remote changes and skips send* calls meanwhile
+  get isApplyingRemoteUpdate() { return this._connector.isApplyingRemoteUpdate; }
+  set isApplyingRemoteUpdate(value) { this._connector.isApplyingRemoteUpdate = !!value; }
   get userRole() { return this._userRole; }
   get isPlaying() { return this._isPlaying; }
   get bpm() { return Tone.Transport.bpm.value; }
