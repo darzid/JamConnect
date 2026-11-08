@@ -11,11 +11,9 @@ const DEFAULT_ICE_SERVERS = [
 ];
 
 const PEER_PREFIX = 'jam-';
-const PING_INTERVAL = 500;
-const HEARTBEAT_INTERVAL = 1000;
+const PING_INTERVAL = 10000;
+const HEARTBEAT_INTERVAL = 10000;
 const START_DELAY = 0.015;
-
-console.log("Loading jam connect");
 
 function generateRandomCode(length = 6, alphabet = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ') {
   const bytes = new Uint8Array(length);
@@ -31,14 +29,47 @@ function generateRandomCode(length = 6, alphabet = '23456789ABCDEFGHJKLMNPQRSTUV
   return out;
 }
 
+class Logger {
+  constructor(jamConnector, alwaysLogWarnings = true, alwaysLogErrors = true) {
+    this.connector = jamConnector;
+  }
+  
+  log(message, ...args) {
+    if (!this.connector.enableLogging)
+      return;
+    message = `[${performance.now()}] ${arguments.callee.caller.toString()}() ${message}`;
+    if (args)
+      console.log(message, args);
+    else
+      console.log(message);
+  }
+
+  warn(message, ...args) {
+    message = `[${performance.now()}] ${arguments.callee.caller.toString()}() ${message}`;
+    if (args)
+      console.warn(message, args);
+    else
+      console.warn(message);
+  }
+  
+  error(message, ...args) {
+    message = `[${performance.now()}] ${arguments.callee.caller.toString()}() ${message}`;
+    if (args)
+      console.error(message, args);
+    else
+      console.error(message);
+  }
+}
+
 class JamConnector {
   constructor(appName, toneInstance, options = {}) {
     this.appName = appName;
     this.Tone = toneInstance;
     this.isHost = false;
     this.signalConfig = options.signalConfig || {}; // Optional custom PeerJS host/port/path
+    this.logger = new Logger(this);
     this.enableLogging = options.enableLogging || false;
-    console.log("JamConnector: Logging = " + this.enableLogging);
+    this.logger.log("JamConnector: Logging = " + this.enableLogging);
     
     // Session credentials (only thing needed in QR code / URL link)
     this.sessionId = null;
@@ -540,6 +571,9 @@ class JamConnector {
         if (peer.authenticated && peer.conn && peer.conn.open) {
           this._measureClockOffset(peer.conn);
         }
+        else if (peer.authenticated && peer.conn && !peer.conn.open) {
+          console.warn("Peer connection closed", peer);
+        }
       }
     }, PING_INTERVAL);
 
@@ -568,9 +602,8 @@ class JamConnector {
 
   _routeMessage(msg, senderId) {
     if (!msg || !msg.type) return;
-    if (this.enableLogging) {
-      console.log("JamConnector.routeMessage: msg, senderId", msg, senderId);
-    }
+    
+    this.logger.log("msg=" + msg, senderId);
     switch (msg.type) {
       case 'PING':
         if (this.hostConn && this.hostConn.open) {
@@ -666,8 +699,7 @@ class JamConnector {
         if (!this.permissions.syncDeviceParameterChange) return;
         
         if (this.onDeviceParameterChanged) {
-          if (this.enableLogging)
-            console.log("onDeviceParameterChanged " + msg.param, msg.value);
+          this.logger.log("onDeviceParameterChanged param=" + msg.param, msg.value);
           this.onDeviceParameterChanged(msg.appName, msg.param, msg.value, msg.normalizedValue);
         }
         if (this.isHost) {
@@ -766,9 +798,8 @@ class JamConnector {
   }
 
   broadcast(obj, excludePeerId = null) {
-    if (this.enableLogging) {
-      console.log("JamConnector.broadcast: obj, excludePeerId", obj, excludePeerId);
-    }
+    this.logger.log("obj, excludePeerId", obj, excludePeerId);
+  
     if (this.isHost) {
       for (const [id, peer] of this.peers.entries()) {
         if (id !== excludePeerId && peer.authenticated && peer.conn && peer.conn.open) {
@@ -868,9 +899,8 @@ class JamConnector {
   }
 
   sendPatternStepUpdate(instrument, stepIndex, stepData) {
-    if (this.enableLogging) {
-      console.log("sendPatternStepUpdate", instrument, stepIndex, stepData);
-    }
+    this.logger.log("instrument, stepIndex, stepData", instrument, stepIndex, stepData);
+    
     this.broadcast({
       type: 'PATTERN_STEP_UPDATE',
       appName: this.appName,
@@ -881,9 +911,8 @@ class JamConnector {
   }
 
   sendFullPatternUpdate(instrument, pattern, presetName = null) {
-    if (this.enableLogging) {
-      console.log("sendFullPatternUpdate", instrument, pattern, presetName);
-    }
+    this.logger.log("instrument=" + instrument, pattern, presetName);
+    
     this.broadcast({
       type: 'PATTERN_FULL_UPDATE',
       appName: this.appName,
@@ -894,9 +923,9 @@ class JamConnector {
   }
 
   sendDeviceParameterChange(param, value, normalizedValue = null) {
-    if (this.enableLogging) {
-      console.log("sendDeviceParameterChange", param, value, normalizedValue);
-    }
+    
+    this.logger.log("param=" + param, value, normalizedValue);
+    
     this.broadcast({
       type: 'DEVICE_PARAMETER_CHANGE',
       appName: this.appName,
@@ -907,9 +936,9 @@ class JamConnector {
   }
 
   sendMasterSettingUpdate(setting, value) {
-    if (this.enableLogging) {
-      console.log("sendMasterSettingUpdate", setting, value);
-    }
+    
+    this.logger.log("setting=" + setting, value);
+    
     this.broadcast({
       type: 'MASTER_SETTING_UPDATE',
       appName: this.appName,
