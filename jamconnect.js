@@ -64,7 +64,9 @@ class JamConnector {
 
     this._pingInterval = null;
     this._heartbeatInterval = null;
-
+    this._paramChangeBuffer = [];
+    this._lastParamChangeTime = performance.now();
+    
     // Event listener callbacks
     this.onSessionCreated = null;      // ({ sessionId, authToken, inviteUrl })
     this.onPeerConnected = null;       // (peerId, peersList)
@@ -891,16 +893,31 @@ class JamConnector {
   }
 
   sendDeviceParameterChange(param, value, normalizedValue = null) {
-    
     this.logger.log("sendDeviceParameterChange, param=" + param, value, normalizedValue);
+    let delta = performance.now() - this._lastParamChangeTime;
+    if (delta < 30) {
+      setTimeout(() => {
+        this.broadcast({
+          type: 'DEVICE_PARAMETER_CHANGE',
+          appName: this.appName,
+          param,
+          value,
+          normalizedValue
+        });
+      }, 30);
+      this.logger.log("delayed parameter change");
+    }
+    else {
+      this.broadcast({
+        type: 'DEVICE_PARAMETER_CHANGE',
+        appName: this.appName,
+        param,
+        value,
+        normalizedValue
+      });
+    }
     
-    this.broadcast({
-      type: 'DEVICE_PARAMETER_CHANGE',
-      appName: this.appName,
-      param,
-      value,
-      normalizedValue
-    });
+    this._lastParamChangeTime = performance.now();
   }
 
   sendMasterSettingUpdate(setting, value) {
