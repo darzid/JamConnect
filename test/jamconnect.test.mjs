@@ -296,3 +296,21 @@ test('peer names are rendered as text, never as HTML', async () => {
     assert.ok(el.htmlWrites.every(html => !html.includes('onerror')), `no remote HTML in #${el.id}`);
   }
 });
+// ---------- 7. Timing options ----------
+
+test('timing constants are exposed as overridable per-instance options', () => {
+  const env = loadJamConnect();
+  const defaults = new env.JamConnector('Acid303', env.createTone());
+  assert.equal(defaults.timing.startDelaySec, 0.015);
+  assert.equal(defaults.timing.paramBufferMs, 0);
+  assert.equal(defaults.timing.pingIntervalMs, 10000);
+
+  const tuned = new env.JamConnector('Acid303', env.createTone(), { timing: { startDelaySec: 0.08, paramBufferMs: 30 } });
+  assert.equal(tuned.timing.startDelaySec, 0.08);
+  assert.equal(tuned.timing.paramBufferMs, 30);
+  assert.equal(tuned.timing.pingIntervalMs, 10000);
+  assert.equal(defaults.timing.paramBufferMs, 0, 'overrides do not leak into other instances');
+
+  const client = new env.JamConnectClient('Acid303', null, false, { timing: { paramBufferMs: 20 } });
+  assert.equal(client.connector.timing.paramBufferMs, 20);
+});

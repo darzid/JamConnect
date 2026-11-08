@@ -16,6 +16,16 @@ const HEARTBEAT_INTERVAL = 10000;
 const START_DELAY = 0.015;
 const PARAM_CHANGE_BUFFER_TIME = 0;
 
+// Timing defaults. Override per instance with new JamConnector(app, Tone, { timing: { ... } })
+// or later through connector.timing.
+const JAM_DEFAULT_TIMING = {
+  pingIntervalMs: PING_INTERVAL,        // host -> guest clock pings
+  startDelaySec: START_DELAY,           // lead time before a shared transport start
+  paramBufferMs: PARAM_CHANGE_BUFFER_TIME, // parameter batching window, 0 = send immediately
+  heartbeatDriftSec: 0.025,             // heartbeat re-aligns the transport beyond this drift
+  heartbeatBpmTolerance: 0.5            // heartbeat applies the host tempo beyond this difference
+};
+
 const JAM_MESSAGE_TYPES = new Set([
   'AUTH_HELLO', 'AUTH_OK', 'AUTH_REJECTED', 'PING', 'PONG', 'CLOCK_SYNC', 'PEER_LIST',
   'PERMISSIONS_UPDATE', 'FULL_STATE_SYNC', 'TRANSPORT_STATE', 'TRANSPORT_HEARTBEAT',
@@ -161,6 +171,7 @@ class JamConnector {
     this.Tone = toneInstance;
     this.isHost = false;
     this.signalConfig = options.signalConfig || {}; // Optional custom PeerJS host/port/path
+    this.timing = { ...JAM_DEFAULT_TIMING, ...(options.timing || {}) };
     this.logger = new Logger(this);
     this.enableLogging = options.enableLogging || false;
     this.logger.log("JamConnector: Logging = " + this.enableLogging);
@@ -673,7 +684,7 @@ class JamConnector {
           this.logger.warn("Peer connection closed", peer);
         }
       }
-    }, PING_INTERVAL);
+    }, this.timing.pingIntervalMs);
 
     /*
       // Send Transport phase/ticks heartbeat every 2 seconds while playing
@@ -932,7 +943,7 @@ class JamConnector {
   }
 
   _applyTransportHeartbeat(msg) {
-    if (typeof msg.bpm === 'number' && Math.abs(this.Tone.Transport.bpm.value - msg.bpm) > 0.5) {
+    if (typeof msg.bpm === 'number' && Math.abs(this.Tone.Transport.bpm.value - msg.bpm) > this.timing.heartbeatBpmTolerance) {
       this.Tone.Transport.bpm.value = msg.bpm;
     }
     if (this.Tone.Transport.state !== 'started') {
@@ -943,8 +954,8 @@ class JamConnector {
     const transitSec = Math.max(0, (this.rtt || 20) / 2) / 1000;
     const expectedSeconds = (msg.seconds || 0) + transitSec;
     const drift = Math.abs(this.Tone.Transport.seconds - expectedSeconds);
-    // Re-align if phase drift exceeds 25ms
-    if (drift > 0.025) {
+    // Re-align if phase drift exceeds timing.heartbeatDriftSec
+    if (drift > this.timing.heartbeatDriftSec) {
       this.Tone.Transport.seconds = expectedSeconds;
     }
   }
@@ -997,7 +1008,7 @@ class JamConnector {
     if (!this.isHost && this.isConnectedToHost && !this.permissions.syncTransport) return;
 
     this.Tone.Transport.bpm.value = bpm;
-    const delaySec = START_DELAY; // 80ms lookahead for tight simultaneous start
+    const delaySec = this.timing.startDelaySec; // lead time for a tight simultaneous start
     const futureStartTime = this.Tone.now() + delaySec;
     this.Tone.Transport.seconds = 0;
     this.Tone.Transport.ticks = 0;
@@ -1087,7 +1098,7 @@ class JamConnector {
   sendDeviceParameterChange(param, value, normalizedValue = null) {
     
     let delta = performance.now() - this._lastParamChangeTime;
-    if (delta < PARAM_CHANGE_BUFFER_TIME) {
+    if (delta < this.timing.paramBufferMs) {
       this._paramChangeBuffer.push({param: param, value: value});
       setTimeout(() => {
         this.broadcast({
@@ -1229,9 +1240,9 @@ const JamConnectActions = {
 };
 
 class JamConnectClient {
-  constructor(appName, parentElement, enableLogging = false) {
+  constructor(appName, parentElement, enableLogging = false, connectorOptions = {}) {
     this._tone = Tone;
-    this._connector = new JamConnector(appName, this._tone, {enableLogging: enableLogging});
+    this._connector = new JamConnector(appName, this._tone, {...connectorOptions, enableLogging: enableLogging});
     this._parentElement = parentElement;
     this._userRole = null;
     this._isPlaying = false;
