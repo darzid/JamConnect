@@ -918,7 +918,9 @@ class JamConnector {
           appName: this.appName,
           changes: this._paramChangeBuffer
         });
+        this.logger.log("sendDeviceParameterChange: sent buffer", this._paramChangeBuffer);
         this._paramChangeBuffer = [];
+        
       }, 30);
       this.logger.log("sendDeviceParameterChange: buffered change");
     }
