@@ -207,6 +207,7 @@ class JamConnector {
         // Auto-reconnect to signaling server if still hosting
         if (this.isHost && this.peer && !this.peer.destroyed) {
           try {
+            this.logger.warn("Reconnecting disconnected peer");
             this.peer.reconnect();
           } catch (_) {}
         }
@@ -220,7 +221,7 @@ class JamConnector {
             peer.destroy();
             this.createHostSession(null, this.authToken).then(resolve).catch(reject);
             return;
-          }
+          } 
           settled = true;
           this._emitConnectionState('error', err.message || 'Signaling error');
           reject(err);
