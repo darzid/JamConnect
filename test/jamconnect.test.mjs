@@ -278,3 +278,21 @@ test('malformed messages are dropped with a warning, numeric fields are clamped'
   assert.equal(pads[0][3], 1);
   assert.equal(params[0][3], 1);
 });
+
+// ---------- 2. XSS ----------
+
+test('peer names are rendered as text, never as HTML', async () => {
+  const env = loadJamConnect();
+  const client = new env.JamConnectClient('Acid303', env.document.getElementById('app'));
+  const evil = '<img src=x onerror=alert(1)>';
+  client._updateStatusUI({ status: 'hosting', message: 'Session JAM-TEST', peers: [{ id: 'p1', name: evil, rtt: 12 }] });
+
+  const list = env.document.getElementById('jam-peers-list');
+  assert.equal(list.htmlWrites.length, 0, 'the peer list must not be written with innerHTML');
+  assert.equal(list.children.length, 2);
+  assert.equal(list.children[1].textContent, `${evil} (12ms)`);
+  for (const el of env.document.byId.values()) {
+    if (el.id === 'app') continue;
+    assert.ok(el.htmlWrites.every(html => !html.includes('onerror')), `no remote HTML in #${el.id}`);
+  }
+});

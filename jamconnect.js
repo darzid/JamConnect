@@ -1593,8 +1593,17 @@ class JamConnectClient {
     if (peersListEl) {
       if (peers.length > 0) {
         peersListEl.style.display = 'flex';
-        peersListEl.innerHTML = `<span class="text-[10px] font-mono text-slate-400 uppercase mr-1">Connected:</span>` +
-          peers.map(p => `<span class="text-xs font-mono bg-emerald-950/80 text-emerald-300 border border-emerald-700/60 px-2 py-0.5 rounded">${p.name} (${p.rtt || 0}ms)</span>`).join('');
+        // Peer names come from remote peers: build text nodes, never HTML
+        const label = document.createElement('span');
+        label.className = 'text-[10px] font-mono text-slate-400 uppercase mr-1';
+        label.textContent = 'Connected:';
+        const chips = peers.map(p => {
+          const chip = document.createElement('span');
+          chip.className = 'text-xs font-mono bg-emerald-950/80 text-emerald-300 border border-emerald-700/60 px-2 py-0.5 rounded';
+          chip.textContent = `${jamCleanName(p.name, 'Jammer')} (${Math.round(Number(p.rtt) || 0)}ms)`;
+          return chip;
+        });
+        peersListEl.replaceChildren(label, ...chips);
       } else {
         peersListEl.style.display = 'none';
       }
