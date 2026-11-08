@@ -396,3 +396,72 @@ test('remotely applied changes are not echoed back', async () => {
   host.sendDeviceParameterChange('cutoff', 6, 0.6);
   assert.equal(hostConnToGuest.sent.length, before + 1);
 });
+// ---------- 4. Start / join timing ----------
+
+const TICK_TOLERANCE = 1; // 1 tick at PPQ 192 / 120 BPM = 2.6 ms
+
+function phaseErrorTicks(env, a, b) {
+  const t = env.clock.now() / 1000 + 0.1;
+  return Math.abs(a.Tone.Transport.ticksAt(t) - b.Tone.Transport.ticksAt(t));
+}
+
+for (const startDelaySec of [0.015, 0.1]) {
+  test(`host and guest start together with 30 ms one-way latency (start lead ${startDelaySec * 1000} ms)`, async () => {
+    const env = loadJamConnect({ latencyMs: () => 30 });
+    const { host, guests: [guest] } = await startSession(env, { hostOptions: { timing: { startDelaySec } } });
+    assert.equal(guest.rtt, 60, 'clock sync measured the round trip');
+
+    host.startTransport(120);
+    env.clock.advance(300);
+    assert.equal(host.Tone.Transport.state, 'started');
+    assert.equal(guest.Tone.Transport.state, 'started');
+    assert.ok(phaseErrorTicks(env, host, guest) < TICK_TOLERANCE, `phase error ${phaseErrorTicks(env, host, guest)} ticks`);
+  });
+}
+
+test('a guest joining a running session lands on the host position', async () => {
+  const env = loadJamConnect({ latencyMs: () => 30 });
+  const { host } = await startSession(env, { guests: 0 });
+  host.startTransport(132);
+  env.clock.advance(1234);
+
+  const { sessionId, authToken } = host;
+  const guest = new env.JamConnector('Acid303', env.createTone());
+  const joining = guest.joinHost(`${sessionId}:${authToken}`);
+  env.clock.advance(400);
+  await joining;
+  assert.equal(guest.Tone.Transport.state, 'started');
+  assert.equal(guest.Tone.Transport.bpm.value, 132);
+  assert.ok(phaseErrorTicks(env, host, guest) < TICK_TOLERANCE, `phase error ${phaseErrorTicks(env, host, guest)} ticks`);
+});
+
+test('a start from a guest is relayed so the host and other guests line up with it', async () => {
+  const env = loadJamConnect({ latencyMs: () => 30 });
+  const { host, guests: [a, b] } = await startSession(env, { guests: 2 });
+  a.startTransport(120);
+  env.clock.advance(300);
+  assert.ok(phaseErrorTicks(env, a, host) < TICK_TOLERANCE, `host vs A: ${phaseErrorTicks(env, a, host)} ticks`);
+  assert.ok(phaseErrorTicks(env, a, b) < TICK_TOLERANCE, `B vs A: ${phaseErrorTicks(env, a, b)} ticks`);
+});
+
+test('pads use the measured RTT on the host, with no 20 ms guess', async () => {
+  const env = loadJamConnect({ latencyMs: () => 30 });
+  const { host, guests: [guest] } = await startSession(env);
+  const played = [];
+  host.onPadTriggered = (app, instrument, note, velocity, time) => played.push(time - host.Tone.now());
+
+  guest.hostConn.send({ type: 'PAD_PLAY', appName: 'Acid303', instrument: 'bass', note: 'C2', velocity: 0.8, delayFromSendMs: 0 });
+  guest.hostConn.send({ type: 'PAD_PLAY', appName: 'Acid303', instrument: 'bass', note: 'C2', velocity: 0.8, delayFromSendMs: 50 });
+  env.clock.advance(100);
+  assert.equal(played.length, 2);
+  assert.ok(Math.abs(played[0]) < 1e-9, 'on-grid pad plays immediately');
+  assert.ok(Math.abs(played[1] - 0.020) < 1e-9, '50 ms lead minus the 30 ms measured transit');
+});
+
+test('solo start is immediate (no +0.5 s)', async () => {
+  const env = loadJamConnect();
+  const client = new env.JamConnectClient('Acid303', null);
+  await client.startTransport();
+  const [start] = env.ctx.Tone.Transport.starts;
+  assert.ok(Math.abs(start.at - env.ctx.Tone.now()) < 1e-9);
+});
