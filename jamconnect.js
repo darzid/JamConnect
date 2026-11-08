@@ -29,38 +29,6 @@ function generateRandomCode(length = 6, alphabet = '23456789ABCDEFGHJKLMNPQRSTUV
   return out;
 }
 
-class Logger {
-  constructor(jamConnector, alwaysLogWarnings = true, alwaysLogErrors = true) {
-    this.connector = jamConnector;
-  }
-  
-  log(message, ...args) {
-    if (!this.connector.enableLogging)
-      return;
-    message = `[${performance.now()}] ${arguments.callee.caller.toString()}() ${message}`;
-    if (args)
-      console.log(message, args);
-    else
-      console.log(message);
-  }
-
-  warn(message, ...args) {
-    message = `[${performance.now()}] ${arguments.callee.caller.toString()}() ${message}`;
-    if (args)
-      console.warn(message, args);
-    else
-      console.warn(message);
-  }
-  
-  error(message, ...args) {
-    message = `[${performance.now()}] ${arguments.callee.caller.toString()}() ${message}`;
-    if (args)
-      console.error(message, args);
-    else
-      console.error(message);
-  }
-}
-
 class JamConnector {
   constructor(appName, toneInstance, options = {}) {
     this.appName = appName;
@@ -603,7 +571,7 @@ class JamConnector {
   _routeMessage(msg, senderId) {
     if (!msg || !msg.type) return;
     
-    this.logger.log("msg=" + msg, senderId);
+    this.logger.log("_routeMessage, msg=" + msg, senderId);
     switch (msg.type) {
       case 'PING':
         if (this.hostConn && this.hostConn.open) {
@@ -699,7 +667,7 @@ class JamConnector {
         if (!this.permissions.syncDeviceParameterChange) return;
         
         if (this.onDeviceParameterChanged) {
-          this.logger.log("onDeviceParameterChanged param=" + msg.param, msg.value);
+          this.logger.log("onDeviceParameterChanged, param=" + msg.param, msg.value);
           this.onDeviceParameterChanged(msg.appName, msg.param, msg.value, msg.normalizedValue);
         }
         if (this.isHost) {
@@ -798,7 +766,7 @@ class JamConnector {
   }
 
   broadcast(obj, excludePeerId = null) {
-    this.logger.log("obj, excludePeerId", obj, excludePeerId);
+    this.logger.log("broadcast, obj, excludePeerId", obj, excludePeerId);
   
     if (this.isHost) {
       for (const [id, peer] of this.peers.entries()) {
@@ -899,7 +867,7 @@ class JamConnector {
   }
 
   sendPatternStepUpdate(instrument, stepIndex, stepData) {
-    this.logger.log("instrument, stepIndex, stepData", instrument, stepIndex, stepData);
+    this.logger.log("sendPatternStepUpdate, instrument, stepIndex, stepData", instrument, stepIndex, stepData);
     
     this.broadcast({
       type: 'PATTERN_STEP_UPDATE',
@@ -911,7 +879,7 @@ class JamConnector {
   }
 
   sendFullPatternUpdate(instrument, pattern, presetName = null) {
-    this.logger.log("instrument=" + instrument, pattern, presetName);
+    this.logger.log("sendFullPatternUpdate, instrument=" + instrument, pattern, presetName);
     
     this.broadcast({
       type: 'PATTERN_FULL_UPDATE',
@@ -924,7 +892,7 @@ class JamConnector {
 
   sendDeviceParameterChange(param, value, normalizedValue = null) {
     
-    this.logger.log("param=" + param, value, normalizedValue);
+    this.logger.log("sendDeviceParameterChange, param=" + param, value, normalizedValue);
     
     this.broadcast({
       type: 'DEVICE_PARAMETER_CHANGE',
@@ -937,7 +905,7 @@ class JamConnector {
 
   sendMasterSettingUpdate(setting, value) {
     
-    this.logger.log("setting=" + setting, value);
+    this.logger.log("sendMasterSettingUpdate, setting=" + setting, value);
     
     this.broadcast({
       type: 'MASTER_SETTING_UPDATE',
@@ -996,6 +964,43 @@ class JamConnector {
       delayFromSendMs,
       extra
     });
+  }
+}
+
+class Logger {
+  constructor(jamConnector, alwaysLogWarnings = true, alwaysLogErrors = true) {
+    this.connector = jamConnector;
+  }
+  
+  log(message, ...args) {
+    if (!this.connector.enableLogging)
+      return;
+    message = `[${this.getTime()}] ${message}`;
+    if (args)
+      console.log(message, args);
+    else
+      console.log(message);
+  }
+
+  warn(message, ...args) {
+    message = `[${this.getTime()}] ${message}`;
+    if (args)
+      console.warn(message, args);
+    else
+      console.warn(message);
+  }
+  
+  error(message, ...args) {
+    message = `[${this.getTime()}] ${message}`;
+    if (args)
+      console.error(message, args);
+    else
+      console.error(message);
+  }
+  
+  getTime() {
+    const d = new Date();
+    return d.toLocaleTimeString();
   }
 }
 
