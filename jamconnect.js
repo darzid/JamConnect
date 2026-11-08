@@ -14,6 +14,7 @@ const PEER_PREFIX = 'jam-';
 const PING_INTERVAL = 10000;
 const HEARTBEAT_INTERVAL = 10000;
 const START_DELAY = 0.015;
+const PARAM_CHANGE_BUFFER_TIME = 30;
 
 function generateRandomCode(length = 6, alphabet = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ') {
   const bytes = new Uint8Array(length);
@@ -677,6 +678,20 @@ class JamConnector {
         }
         break;
 
+      case 'DEVICE_PARAMETER_CHANGES':
+        if (!this.permissions.syncDeviceParameterChange) return;
+        
+        if (this.onDeviceParameterChanged) {
+          this.logger.log("onDeviceParametersChanged, changes=" + msg.changes);
+          msg.changes.forEach(change => {
+            this.onDeviceParameterChanged(msg.appName, change.param, chamge.value);
+          });
+        }
+        if (this.isHost) {
+          this.broadcast(msg, senderId);
+        }
+        break;
+
       case 'MASTER_SETTING_UPDATE':
         if (!this.permissions.syncMasterSettings) return;
         if (this.onMasterSettingUpdated) {
@@ -893,21 +908,22 @@ class JamConnector {
   }
 
   sendDeviceParameterChange(param, value, normalizedValue = null) {
-    this.logger.log("sendDeviceParameterChange, param=" + param, value, normalizedValue);
+    
     let delta = performance.now() - this._lastParamChangeTime;
-    if (delta < 30) {
+    if (delta < PARAM_CHANGE_BUFFER_TIME) {
+      this._paramChangeBuffer.push({param: param, value: value});
       setTimeout(() => {
         this.broadcast({
-          type: 'DEVICE_PARAMETER_CHANGE',
+          type: 'DEVICE_PARAMETER_CHANGES',
           appName: this.appName,
-          param,
-          value,
-          normalizedValue
+          changes: this._paramChangeBuffer
         });
+        this._paramChangeBuffer = [];
       }, 30);
-      this.logger.log("delayed parameter change");
+      this.logger.log("sendDeviceParameterChange: buffered change");
     }
     else {
+      this.logger.log("sendDeviceParameterChange, param=" + param, value, normalizedValue);
       this.broadcast({
         type: 'DEVICE_PARAMETER_CHANGE',
         appName: this.appName,
