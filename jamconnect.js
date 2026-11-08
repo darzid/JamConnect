@@ -14,7 +14,7 @@ const PEER_PREFIX = 'jam-';
 const PING_INTERVAL = 10000;
 const HEARTBEAT_INTERVAL = 10000;
 const START_DELAY = 0.015;
-const PARAM_CHANGE_BUFFER_TIME = 30;
+const PARAM_CHANGE_BUFFER_TIME = 0;
 
 function generateRandomCode(length = 6, alphabet = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ') {
   const bytes = new Uint8Array(length);
