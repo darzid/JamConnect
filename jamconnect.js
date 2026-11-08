@@ -766,9 +766,9 @@ class JamConnector {
   }
 
   broadcast(obj, excludePeerId = null) {
-    this.logger.log("broadcast, obj, excludePeerId", obj, excludePeerId);
-  
     if (this.isHost) {
+      this.logger.log("broadcast from host, obj, excludePeerId", obj, excludePeerId);
+  
       for (const [id, peer] of this.peers.entries()) {
         if (id !== excludePeerId && peer.authenticated && peer.conn && peer.conn.open) {
           this._sendTo(peer.conn, obj);
