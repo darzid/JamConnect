@@ -242,7 +242,7 @@ class JamConnector {
       });
 
       peer.on('error', (err) => {
-        console.warn('[JamConnector Host Error]', err);
+        this.logger.error('[JamConnector Host Error]', err);
         if (!settled) {
           if (err && err.type === 'unavailable-id') {
             // Session ID collision: retry with a fresh random ID
@@ -499,7 +499,7 @@ class JamConnector {
 
       peer.on('error', (err) => {
         clearTimeout(connectTimeout);
-        console.warn('[JamConnector Guest Error]', err);
+        this.logger.warn('[JamConnector Guest Error]', err);
         const friendlyMsg = err.type === 'peer-unavailable'
           ? `Session "${this.sessionId}" not found or Host is offline.`
           : (err.message || 'Could not connect to session');
@@ -572,7 +572,7 @@ class JamConnector {
           this._measureClockOffset(peer.conn);
         }
         else if (peer.authenticated && peer.conn && !peer.conn.open) {
-          console.warn("Peer connection closed", peer);
+          this.logger.warn("Peer connection closed", peer);
         }
       }
     }, PING_INTERVAL);
@@ -792,7 +792,7 @@ class JamConnector {
       try {
         conn.send(obj);
       } catch (err) {
-        console.warn('[JamConnector Send Error]', err);
+        this.logger.warn('[JamConnector Send Error]', err);
       }
     }
   }
