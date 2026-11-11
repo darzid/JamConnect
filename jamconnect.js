@@ -909,7 +909,7 @@ class JamConnector {
           this.broadcast({ ...msg, delayFromSendMs: Math.round(padDelayMs) }, senderId);
         }
         break;
-      }
+      
 
       case 'MIDI_EVENT':
         if (!this.permissions.syncMidi) return;
@@ -942,6 +942,7 @@ class JamConnector {
       case 'MASTER_SETTING_UPDATE':
         return !!p.syncMasterSettings;
       case 'PAD_PLAY':
+      case 'PLAY_NOTE':
       case 'MIDI_EVENT':
         return !!p.syncMidi;
       default:
