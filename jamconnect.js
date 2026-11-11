@@ -16,6 +16,142 @@ const HEARTBEAT_INTERVAL = 10000;
 const START_DELAY = 0.015;
 const PARAM_CHANGE_BUFFER_TIME = 0;
 
+// Timing defaults. Override per instance with new JamConnector(app, Tone, { timing: { ... } })
+// or later through connector.timing.
+const JAM_DEFAULT_TIMING = {
+  pingIntervalMs: PING_INTERVAL,        // host -> guest clock pings
+  startDelaySec: START_DELAY,           // lead time before a shared transport start
+  paramBufferMs: PARAM_CHANGE_BUFFER_TIME, // parameter batching window, 0 = send immediately
+  heartbeatDriftSec: 0.025,             // heartbeat re-aligns the transport beyond this drift
+  heartbeatBpmTolerance: 0.5,           // heartbeat applies the host tempo beyond this difference
+  joinSyncTimeoutMs: 2000               // max wait for the first clock sync before joining a running transport
+};
+
+const JAM_MESSAGE_TYPES = new Set([
+  'AUTH_HELLO', 'AUTH_OK', 'AUTH_REJECTED', 'PING', 'PONG', 'CLOCK_SYNC', 'PEER_LIST',
+  'PERMISSIONS_UPDATE', 'FULL_STATE_SYNC', 'TRANSPORT_STATE', 'TRANSPORT_HEARTBEAT',
+  'PATTERN_STEP_UPDATE', 'PATTERN_FULL_UPDATE', 'DEVICE_PARAMETER_CHANGE', 'DEVICE_PARAMETER_CHANGES',
+  'MASTER_SETTING_UPDATE', 'PAD_PLAY', 'MIDI_EVENT'
+]);
+
+// Messages only the host may send; guests accept them only from the host connection
+const JAM_HOST_ONLY_TYPES = new Set(['PING', 'CLOCK_SYNC', 'PEER_LIST', 'PERMISSIONS_UPDATE', 'TRANSPORT_HEARTBEAT']);
+
+// Accepted [min, max] for incoming numeric fields. Non-finite values are rejected, others clamped.
+const JAM_MESSAGE_LIMITS = {
+  bpm: [20, 400],
+  swing: [0, 1],
+  velocity: [0, 1],
+  normalizedValue: [0, 1],
+  seconds: [0, Infinity],
+  ticks: [0, Infinity],
+  delaySec: [0, 10],
+  delayFromSendMs: [0, 10000],
+  rtt: [0, 60000],
+  timeOffset: [-Infinity, Infinity],
+  hostTime: [-Infinity, Infinity],
+  hostAudioTime: [-Infinity, Infinity],
+  hostSendTime: [-Infinity, Infinity],
+  guestReceiveTime: [-Infinity, Infinity]
+};
+const JAM_MAX_STRING_LENGTH = 256;
+const JAM_MAX_NAME_LENGTH = 64;
+const JAM_MAX_BATCH_SIZE = 512;
+
+function jamCleanName(name, fallback) {
+  const clean = typeof name === 'string' ? name.trim().slice(0, JAM_MAX_NAME_LENGTH) : '';
+  return clean || fallback;
+}
+
+function jamSanitizePermissions(permissions) {
+  if (!permissions || typeof permissions !== 'object' || Array.isArray(permissions)) return null;
+  const out = {};
+  for (const [key, value] of Object.entries(permissions)) {
+    if (typeof value === 'boolean') out[key] = value;
+  }
+  return out;
+}
+
+function jamIsValidValue(value) {
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (typeof value === 'string') return value.length <= JAM_MAX_STRING_LENGTH;
+  return true;
+}
+
+function jamClamp(value, [min, max]) {
+  return Math.min(max, Math.max(min, value));
+}
+
+/**
+ * Checks the shape of an incoming message and clamps its numeric fields in place.
+ * Returns null if the message is acceptable, otherwise the reason it must be dropped.
+ */
+function validateJamMessage(msg) {
+  if (!msg || typeof msg !== 'object' || Array.isArray(msg)) return 'not an object';
+  if (typeof msg.type !== 'string' || !JAM_MESSAGE_TYPES.has(msg.type)) return 'unknown type';
+
+  for (const [key, range] of Object.entries(JAM_MESSAGE_LIMITS)) {
+    if (msg[key] === undefined || msg[key] === null) continue;
+    if (typeof msg[key] !== 'number' || !Number.isFinite(msg[key])) return `invalid ${key}`;
+    msg[key] = jamClamp(msg[key], range);
+  }
+  if (msg.appName !== undefined && msg.appName !== null) {
+    if (typeof msg.appName !== 'string') return 'invalid appName';
+    msg.appName = msg.appName.slice(0, JAM_MAX_STRING_LENGTH);
+  }
+  const isNum = (key) => typeof msg[key] === 'number';
+  const isStr = (key) => typeof msg[key] === 'string' && msg[key].length <= JAM_MAX_STRING_LENGTH;
+
+  switch (msg.type) {
+    case 'AUTH_HELLO':
+      if (!isStr('authToken')) return 'invalid authToken';
+      break;
+    case 'AUTH_OK':
+      if (msg.permissions !== undefined && !(msg.permissions = jamSanitizePermissions(msg.permissions))) return 'invalid permissions';
+      if (msg.transportState !== undefined && !isStr('transportState')) return 'invalid transportState';
+      break;
+    case 'PING':
+      if (!isNum('hostSendTime')) return 'missing hostSendTime';
+      break;
+    case 'PONG':
+      if (!isNum('hostSendTime') || !isNum('guestReceiveTime')) return 'missing times';
+      break;
+    case 'CLOCK_SYNC':
+      if (!isNum('rtt') || !isNum('timeOffset')) return 'missing rtt/timeOffset';
+      break;
+    case 'PEER_LIST':
+      if (!Array.isArray(msg.peers) || msg.peers.length > JAM_MAX_BATCH_SIZE) return 'invalid peers';
+      if (!msg.peers.every(p => p && typeof p === 'object')) return 'invalid peers';
+      msg.peers = msg.peers.map(p => ({ ...p, name: jamCleanName(p.name, 'Jammer') }));
+      break;
+    case 'PERMISSIONS_UPDATE':
+      if (!(msg.permissions = jamSanitizePermissions(msg.permissions))) return 'invalid permissions';
+      break;
+    case 'TRANSPORT_STATE':
+      if (!isStr('state')) return 'invalid state';
+      break;
+    case 'DEVICE_PARAMETER_CHANGE':
+      if (!isStr('param') || !jamIsValidValue(msg.value)) return 'invalid parameter change';
+      break;
+    case 'DEVICE_PARAMETER_CHANGES':
+      if (!Array.isArray(msg.changes) || msg.changes.length === 0 || msg.changes.length > JAM_MAX_BATCH_SIZE) return 'invalid changes';
+      for (const change of msg.changes) {
+        if (!change || typeof change !== 'object' || typeof change.param !== 'string' ||
+            change.param.length > JAM_MAX_STRING_LENGTH || !jamIsValidValue(change.value)) return 'invalid change';
+        if (change.normalizedValue !== undefined && change.normalizedValue !== null) {
+          if (typeof change.normalizedValue !== 'number' || !Number.isFinite(change.normalizedValue)) return 'invalid change';
+          change.normalizedValue = jamClamp(change.normalizedValue, JAM_MESSAGE_LIMITS.normalizedValue);
+        }
+      }
+      break;
+    case 'MASTER_SETTING_UPDATE':
+      if (!isStr('setting') || !jamIsValidValue(msg.value)) return 'invalid setting';
+      if (msg.setting === 'bpm' && isNum('value')) msg.value = jamClamp(msg.value, JAM_MESSAGE_LIMITS.bpm);
+      break;
+  }
+  return null;
+}
+
 function generateRandomCode(length = 6, alphabet = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ') {
   const bytes = new Uint8Array(length);
   if (window.crypto && window.crypto.getRandomValues) {
@@ -36,6 +172,7 @@ class JamConnector {
     this.Tone = toneInstance;
     this.isHost = false;
     this.signalConfig = options.signalConfig || {}; // Optional custom PeerJS host/port/path
+    this.timing = { ...JAM_DEFAULT_TIMING, ...(options.timing || {}) };
     this.logger = new Logger(this);
     this.enableLogging = options.enableLogging || false;
     this.logger.log("JamConnector: Logging = " + this.enableLogging);
@@ -51,8 +188,12 @@ class JamConnector {
     // Guest state
     this.hostConn = null;
     this.isConnectedToHost = false;
-    this.timeOffset = 0; // ms difference: hostClock - localClock
+    this.timeOffset = 0; // ms difference: localClock - hostClock (performance.now)
     this.rtt = 0;
+    this._clockSynced = false;
+    this._pendingJoinSync = null;
+    this._pendingJoinTimer = null;
+    this._pendingStartUntil = 0;
 
     // Sync permissions / flags
     this.permissions = {
@@ -65,8 +206,10 @@ class JamConnector {
 
     this._pingInterval = null;
     this._heartbeatInterval = null;
-    this._paramChangeBuffer = [];
-    this._lastParamChangeTime = performance.now();
+    this._paramChangeBuffer = new Map(); // param -> latest change within the buffer window
+    this._paramFlushTimer = null;
+    // True while a remote change is being applied; send* calls made meanwhile are not echoed back
+    this.isApplyingRemoteUpdate = false;
     
     // Event listener callbacks
     this.onSessionCreated = null;      // ({ sessionId, authToken, inviteUrl })
@@ -245,8 +388,8 @@ class JamConnector {
   _handleIncomingGuestConnection(conn) {
     const peerId = conn.peer || ('guest_' + generateRandomCode(4));
     const metaToken = conn.metadata && conn.metadata.authToken;
-    const guestName = (conn.metadata && conn.metadata.name) || `Jammer-${peerId.slice(-4)}`;
-    const guestAppName = (conn.metadata && conn.metadata.appName) || 'unknown';
+    const guestName = jamCleanName(conn.metadata && conn.metadata.name, `Jammer-${peerId.slice(-4)}`);
+    const guestAppName = jamCleanName(conn.metadata && conn.metadata.appName, 'unknown');
     const peerRecord = {
       id: peerId,
       name: guestName,
@@ -283,11 +426,11 @@ class JamConnector {
     });
 
     conn.on('data', (raw) => {
-      const msg = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      const msg = this._parseIncoming(raw, peerId);
       if (!peerRecord.authenticated) {
         if (msg && msg.type === 'AUTH_HELLO' && msg.authToken === this.authToken) {
           peerRecord.authenticated = true;
-          if (msg.name) peerRecord.name = msg.name;
+          if (msg.name) peerRecord.name = jamCleanName(msg.name, peerRecord.name);
           clearTimeout(authTimeout);
           this._completeGuestAuth(peerRecord);
         } else {
@@ -298,7 +441,7 @@ class JamConnector {
         }
         return;
       }
-      this._routeMessage(msg, peerId);
+      if (msg) this._routeMessage(msg, peerId);
     });
 
     const cleanup = () => {
@@ -361,6 +504,9 @@ class JamConnector {
 
     this.disconnect();
     this.isHost = false;
+    this.rtt = 0;
+    this.timeOffset = 0;
+    this._clockSynced = false;
     this.sessionId = parsed.sessionId;
     this.authToken = parsed.authToken;
 
@@ -413,7 +559,8 @@ class JamConnector {
         });
 
         conn.on('data', (raw) => {
-          const msg = typeof raw === 'string' ? JSON.parse(raw) : raw;
+          const msg = this._parseIncoming(raw, 'HOST');
+          if (!msg) return;
 
           if (msg.type === 'AUTH_REJECTED') {
             clearTimeout(connectTimeout);
@@ -434,9 +581,9 @@ class JamConnector {
               if (this.onPermissionsUpdated) this.onPermissionsUpdated(this.permissions);
             }
             if (msg.snapshot && this.applyFullStateSnapshot) {
-              this.applyFullStateSnapshot(msg.appName, msg.snapshot);
+              this._applyRemote(() => this.applyFullStateSnapshot(msg.appName, msg.snapshot));
             }
-            this._applyTransportSync(msg);
+            this._applyJoinTransportSync(msg);
             this._emitConnectionState('connected', `Connected to ${this.sessionId}`);
             if (this.onPeerConnected) {
               this.onPeerConnected('HOST', [{ id: 'HOST', name: 'Host', rtt: this.rtt }]);
@@ -494,6 +641,12 @@ class JamConnector {
       clearInterval(this._heartbeatInterval);
       this._heartbeatInterval = null;
     }
+    if (this._paramFlushTimer) {
+      clearTimeout(this._paramFlushTimer);
+      this._paramFlushTimer = null;
+    }
+    this._paramChangeBuffer.clear();
+    this._cancelPendingJoinSync();
 
     for (const peer of this.peers.values()) {
       try { peer.conn.close(); } catch (_) {}
@@ -548,7 +701,7 @@ class JamConnector {
           this.logger.warn("Peer connection closed", peer);
         }
       }
-    }, PING_INTERVAL);
+    }, this.timing.pingIntervalMs);
 
     /*
       // Send Transport phase/ticks heartbeat every 2 seconds while playing
@@ -573,9 +726,34 @@ class JamConnector {
     });
   }
 
+  _parseIncoming(raw, senderId) {
+    let msg = raw;
+    if (typeof raw === 'string') {
+      try {
+        msg = JSON.parse(raw);
+      } catch (_) {
+        msg = null;
+      }
+    }
+    const error = validateJamMessage(msg);
+    if (error) {
+      this.logger.warn(`[JamConnector] Dropping malformed message from ${senderId}: ${error}`);
+      return null;
+    }
+    return msg;
+  }
+
   _routeMessage(msg, senderId) {
     if (!msg || !msg.type) return;
-    
+
+    // Host -> guest control messages: the host never accepts them, guests only from the host connection
+    if (JAM_HOST_ONLY_TYPES.has(msg.type) && (this.isHost || senderId !== 'HOST')) {
+      this.logger.warn(`[JamConnector] Ignoring ${msg.type} from ${senderId}`);
+      return;
+    }
+    // On the host, every guest message is gated by the permission that covers it
+    if (this.isHost && senderId !== 'HOST' && !this._isGuestMessageAllowed(msg)) return;
+
     this.logger.log("_routeMessage, msg=" + msg, senderId);
     switch (msg.type) {
       case 'PING':
@@ -614,9 +792,11 @@ class JamConnector {
         break;
 
       case 'CLOCK_SYNC':
-        this.rtt = msg.rtt || 0;
-        this.timeOffset = msg.timeOffset || 0;
+        this.rtt = msg.rtt;
+        this.timeOffset = msg.timeOffset;
+        this._clockSynced = true;
         this._emitConnectionState('connected', `Connected to ${this.sessionId} (${this.rtt}ms)`);
+        this._flushPendingJoinSync();
         break;
 
       case 'PEER_LIST':
@@ -632,27 +812,28 @@ class JamConnector {
 
       case 'FULL_STATE_SYNC':
         if (msg.snapshot && this.applyFullStateSnapshot) {
-          this.applyFullStateSnapshot(msg.appName, msg.snapshot);
+          this._applyRemote(() => this.applyFullStateSnapshot(msg.appName, msg.snapshot));
         }
         if (this.isHost) this.broadcast(msg, senderId);
         break;
 
-      case 'TRANSPORT_STATE':
-        if (this.isHost && !this.permissions.syncTransport && senderId !== 'HOST') return;
-        this._applyTransportSync(msg);
+      case 'TRANSPORT_STATE': {
+        const start = this._applyTransportSync(msg, senderId);
         if (this.isHost) {
-          this.broadcast(msg, senderId);
+          // Relay a guest's start as seen by the host now, so other guests only compensate their own hop
+          this.broadcast(start ? { ...msg, ...start, hostTime: performance.now() } : msg, senderId);
         }
         break;
+      }
 
       case 'TRANSPORT_HEARTBEAT':
-        this._applyTransportHeartbeat(msg);
+        this._applyTransportHeartbeat(msg, senderId);
         break;
 
       case 'PATTERN_STEP_UPDATE':
         if (!this.permissions.syncPattern) return;
         if (this.onPatternStepUpdated) {
-          this.onPatternStepUpdated(msg.appName, msg.instrument, msg.stepIndex, msg.stepData);
+          this._applyRemote(() => this.onPatternStepUpdated(msg.appName, msg.instrument, msg.stepIndex, msg.stepData));
         }
         if (this.isHost) {
           this.broadcast(msg, senderId);
@@ -661,7 +842,7 @@ class JamConnector {
       case 'PATTERN_FULL_UPDATE':
         if (!this.permissions.syncPattern) return;
         if (this.onPatternUpdated) {
-          this.onPatternUpdated(msg.appName, msg.instrument, msg.pattern, msg.presetName);
+          this._applyRemote(() => this.onPatternUpdated(msg.appName, msg.instrument, msg.pattern, msg.presetName));
         }
         if (this.isHost) {
           this.broadcast(msg, senderId);
@@ -673,7 +854,7 @@ class JamConnector {
         
         if (this.onDeviceParameterChanged) {
           this.logger.log("onDeviceParameterChanged, param=" + msg.param, msg.value);
-          this.onDeviceParameterChanged(msg.appName, msg.param, msg.value, msg.normalizedValue);
+          this._applyRemote(() => this.onDeviceParameterChanged(msg.appName, msg.param, msg.value, msg.normalizedValue));
         }
         if (this.isHost) {
           this.broadcast(msg, senderId);
@@ -685,8 +866,10 @@ class JamConnector {
         
         if (this.onDeviceParameterChanged) {
           this.logger.log("onDeviceParametersChanged, changes=" + msg.changes);
-          msg.changes.forEach(change => {
-            this.onDeviceParameterChanged(msg.appName, change.param, chamge.value);
+          this._applyRemote(() => {
+            msg.changes.forEach(change => {
+              this.onDeviceParameterChanged(msg.appName, change.param, change.value, change.normalizedValue);
+            });
           });
         }
         if (this.isHost) {
@@ -697,7 +880,7 @@ class JamConnector {
       case 'MASTER_SETTING_UPDATE':
         if (!this.permissions.syncMasterSettings) return;
         if (this.onMasterSettingUpdated) {
-          this.onMasterSettingUpdated(msg.appName, msg.setting, msg.value);
+          this._applyRemote(() => this.onMasterSettingUpdated(msg.appName, msg.setting, msg.value));
         }
         if (this.isHost) {
           this.broadcast(msg, senderId);
@@ -716,15 +899,17 @@ class JamConnector {
         
       case 'PAD_PLAY':
         if (!this.permissions.syncMidi) return;
+        // Remaining delay after the measured one-way transit from the sender
+        const padDelayMs = Math.max(0, (msg.delayFromSendMs || 0) - this._rttFor(senderId) / 2);
         if (this.onPadTriggered) {
-          const delaySec = Math.max(0, (msg.delayFromSendMs || 20) - (this.rtt / 2)) / 1000;
-          const playTime = this.Tone.now() + delaySec;
+          const playTime = this.Tone.now() + padDelayMs / 1000;
           this.onPadTriggered(msg.appName, msg.instrument, msg.note, msg.velocity, playTime, msg.extra);
         }
         if (this.isHost) {
-          this.broadcast(msg, senderId);
+          this.broadcast({ ...msg, delayFromSendMs: Math.round(padDelayMs) }, senderId);
         }
         break;
+      }
 
       case 'MIDI_EVENT':
         if (!this.permissions.syncMidi) return;
@@ -738,7 +923,78 @@ class JamConnector {
     }
   }
 
-  _applyTransportSync(msg) {
+  _isGuestMessageAllowed(msg) {
+    const p = this.permissions;
+    switch (msg.type) {
+      case 'AUTH_HELLO':
+      case 'PONG':
+        return true;
+      case 'TRANSPORT_STATE':
+        return msg.state === 'bpmchanged' ? !!p.syncMasterSettings : !!p.syncTransport;
+      case 'FULL_STATE_SYNC':
+        return !!(p.syncPattern && p.syncDeviceParameterChange && p.syncMasterSettings);
+      case 'PATTERN_STEP_UPDATE':
+      case 'PATTERN_FULL_UPDATE':
+        return !!p.syncPattern;
+      case 'DEVICE_PARAMETER_CHANGE':
+      case 'DEVICE_PARAMETER_CHANGES':
+        return !!p.syncDeviceParameterChange;
+      case 'MASTER_SETTING_UPDATE':
+        return !!p.syncMasterSettings;
+      case 'PAD_PLAY':
+      case 'MIDI_EVENT':
+        return !!p.syncMidi;
+      default:
+        return false;
+    }
+  }
+
+  _rttFor(senderId) {
+    if (senderId === 'HOST') return this.rtt || 0;
+    const peer = this.peers.get(senderId);
+    return (peer && peer.rtt) || 0;
+  }
+
+  /**
+   * Seconds since the sender sent msg. If msg carries the sender's send time (hostTime) and the
+   * clock offset to that sender has been measured, uses it; otherwise half the measured RTT plus
+   * the time since the message was received.
+   */
+  _secondsSinceSent(msg, senderId, receivedAt = performance.now()) {
+    const now = performance.now();
+    let elapsedMs;
+    if (senderId === 'HOST' && this._clockSynced && typeof msg.hostTime === 'number') {
+      elapsedMs = now - (msg.hostTime + this.timeOffset);
+    } else {
+      const peer = senderId === 'HOST' ? null : this.peers.get(senderId);
+      if (peer && peer.samples.length && typeof msg.hostTime === 'number') {
+        elapsedMs = now - (msg.hostTime - peer.timeOffset);
+      } else {
+        elapsedMs = now - receivedAt + this._rttFor(senderId) / 2;
+      }
+    }
+    return Math.max(0, elapsedMs) / 1000;
+  }
+
+  _ticksPerSecond(bpm = this.Tone.Transport.bpm.value) {
+    return (bpm / 60) * (this.Tone.Transport.PPQ || 192);
+  }
+
+  // Transport position (ticks) elapsedSec after the position carried by msg
+  _ticksAfter(msg, elapsedSec) {
+    const ticksPerSec = this._ticksPerSecond(typeof msg.bpm === 'number' ? msg.bpm : undefined);
+    const baseTicks = typeof msg.ticks === 'number'
+      ? msg.ticks
+      : (typeof msg.seconds === 'number' ? msg.seconds * ticksPerSec : 0);
+    return baseTicks + elapsedSec * ticksPerSec;
+  }
+
+  /**
+   * Applies a transport message. For a start, returns the start as seen from here right now
+   * ({ delaySec, ticks, seconds }) so the host can relay it with only the next hop left to compensate.
+   */
+  _applyTransportSync(msg, senderId = 'HOST', receivedAt = performance.now()) {
+    this._cancelPendingJoinSync();
     if (typeof msg.bpm === 'number') {
       this.Tone.Transport.bpm.value = msg.bpm;
     }
@@ -746,41 +1002,72 @@ class JamConnector {
       this.Tone.Transport.swing = msg.swing;
     }
 
-    const transitSec = Math.max(0, (this.rtt || 20) / 2) / 1000;
-    
     if (msg.state === 'started' || msg.transportState === 'started') {
-      const targetSeconds = (typeof msg.seconds === 'number' ? msg.seconds : 0) + transitSec;
+      // The sender starts delaySec after sending. lateSec > 0: it is already playing for that long.
+      const delaySec = typeof msg.delaySec === 'number' ? msg.delaySec : 0;
+      const lateSec = this._secondsSinceSent(msg, senderId, receivedAt) - delaySec;
+      const startInSec = Math.max(0, -lateSec);
+      const ticks = Math.max(0, this._ticksAfter(msg, Math.max(0, lateSec)));
       if (this.Tone.Transport.state !== 'started') {
-        this.Tone.Transport.seconds = targetSeconds;
-        const startOffset = typeof msg.delaySec === 'number'
-          ? Math.max(0, msg.delaySec - transitSec)
-          : 0.02;
-        this.Tone.Transport.start(`+${startOffset}`);
-      } else if (typeof msg.ticks === 'number') {
-        this.Tone.Transport.ticks = msg.ticks;
+        this.Tone.Transport.start(`+${startInSec}`, `${Math.round(ticks)}i`);
+        this._pendingStartUntil = performance.now() + startInSec * 1000;
+      } else {
+        this.Tone.Transport.ticks = Math.round(ticks);
       }
+      return { delaySec: startInSec, ticks, seconds: ticks / this._ticksPerSecond() };
     } else if (msg.state === 'stopped' || msg.transportState === 'stopped') {
+      this._pendingStartUntil = 0;
       this.Tone.Transport.stop();
       this.Tone.Transport.seconds = 0;
       this.Tone.Transport.ticks = 0;
     }
+    return null;
   }
 
-  _applyTransportHeartbeat(msg) {
-    if (typeof msg.bpm === 'number' && Math.abs(this.Tone.Transport.bpm.value - msg.bpm) > 0.5) {
-      this.Tone.Transport.bpm.value = msg.bpm;
-    }
-    if (this.Tone.Transport.state !== 'started') {
-      this.Tone.Transport.seconds = msg.seconds || 0;
-      this.Tone.Transport.start();
+  // AUTH_OK arrives before the first clock measurement (the host pings right after it). If the
+  // host is playing, wait for that CLOCK_SYNC (at most timing.joinSyncTimeoutMs) so the join
+  // position is compensated with the measured delay instead of a guess.
+  _applyJoinTransportSync(msg) {
+    const receivedAt = performance.now();
+    if (this._clockSynced || msg.transportState !== 'started') {
+      this._applyTransportSync(msg, 'HOST', receivedAt);
       return;
     }
-    const transitSec = Math.max(0, (this.rtt || 20) / 2) / 1000;
-    const expectedSeconds = (msg.seconds || 0) + transitSec;
-    const drift = Math.abs(this.Tone.Transport.seconds - expectedSeconds);
-    // Re-align if phase drift exceeds 25ms
-    if (drift > 0.025) {
-      this.Tone.Transport.seconds = expectedSeconds;
+    this._cancelPendingJoinSync();
+    if (typeof msg.bpm === 'number') this.Tone.Transport.bpm.value = msg.bpm;
+    if (typeof msg.swing === 'number') this.Tone.Transport.swing = msg.swing;
+    this._pendingJoinSync = { msg, receivedAt };
+    this._pendingJoinTimer = setTimeout(() => this._flushPendingJoinSync(), this.timing.joinSyncTimeoutMs);
+  }
+
+  _flushPendingJoinSync() {
+    const pending = this._pendingJoinSync;
+    if (pending) this._applyTransportSync(pending.msg, 'HOST', pending.receivedAt);
+  }
+
+  _cancelPendingJoinSync() {
+    if (this._pendingJoinTimer) {
+      clearTimeout(this._pendingJoinTimer);
+      this._pendingJoinTimer = null;
+    }
+    this._pendingJoinSync = null;
+  }
+
+  _applyTransportHeartbeat(msg, senderId = 'HOST') {
+    if (typeof msg.bpm === 'number' && Math.abs(this.Tone.Transport.bpm.value - msg.bpm) > this.timing.heartbeatBpmTolerance) {
+      this.Tone.Transport.bpm.value = msg.bpm;
+    }
+    // A start scheduled from TRANSPORT_STATE is still pending: don't start early
+    if (performance.now() < this._pendingStartUntil) return;
+    const expectedTicks = Math.max(0, Math.round(this._ticksAfter(msg, this._secondsSinceSent(msg, senderId))));
+    if (this.Tone.Transport.state !== 'started') {
+      this.Tone.Transport.start(undefined, `${expectedTicks}i`);
+      return;
+    }
+    const drift = Math.abs(this.Tone.Transport.ticks - expectedTicks) / this._ticksPerSecond();
+    // Re-align if phase drift exceeds timing.heartbeatDriftSec
+    if (drift > this.timing.heartbeatDriftSec) {
+      this.Tone.Transport.ticks = expectedTicks;
     }
   }
 
@@ -832,7 +1119,7 @@ class JamConnector {
     if (!this.isHost && this.isConnectedToHost && !this.permissions.syncTransport) return;
 
     this.Tone.Transport.bpm.value = bpm;
-    const delaySec = START_DELAY; // 80ms lookahead for tight simultaneous start
+    const delaySec = this.timing.startDelaySec; // lead time for a tight simultaneous start
     const futureStartTime = this.Tone.now() + delaySec;
     this.Tone.Transport.seconds = 0;
     this.Tone.Transport.ticks = 0;
@@ -846,10 +1133,9 @@ class JamConnector {
       seconds: 0,
       ticks: 0,
       delaySec,
-      hostAudioTime: futureStartTime
+      hostAudioTime: futureStartTime,
+      hostTime: performance.now() // sender's clock at send time; receivers convert it with the measured offset
     });
-    
-    this.resync();
   }
 
   stopTransport() {
@@ -885,6 +1171,7 @@ class JamConnector {
     if (!this.isHost && this.isConnectedToHost && !this.permissions.syncMasterSettings) return;
 
     this.Tone.Transport.bpm.value = bpm;
+    if (this.isApplyingRemoteUpdate) return;
     this.broadcast({
       type: 'TRANSPORT_STATE',
       state: 'bpmchanged',
@@ -896,6 +1183,7 @@ class JamConnector {
   }
 
   sendPatternStepUpdate(instrument, stepIndex, stepData) {
+    if (this.isApplyingRemoteUpdate) return;
     this.logger.log("sendPatternStepUpdate, instrument, stepIndex, stepData", instrument, stepIndex, stepData);
     
     this.broadcast({
@@ -908,6 +1196,7 @@ class JamConnector {
   }
 
   sendFullPatternUpdate(instrument, pattern, presetName = null) {
+    if (this.isApplyingRemoteUpdate) return;
     this.logger.log("sendFullPatternUpdate, instrument=" + instrument, pattern, presetName);
     
     this.broadcast({
@@ -919,39 +1208,55 @@ class JamConnector {
     });
   }
 
+  /**
+   * Sends a parameter change. With timing.paramBufferMs > 0, changes made within one window
+   * are coalesced (last value per parameter wins) and sent as a single message when it ends.
+   */
   sendDeviceParameterChange(param, value, normalizedValue = null) {
-    
-    let delta = performance.now() - this._lastParamChangeTime;
-    if (delta < PARAM_CHANGE_BUFFER_TIME) {
-      this._paramChangeBuffer.push({param: param, value: value});
-      setTimeout(() => {
-        this.broadcast({
-          type: 'DEVICE_PARAMETER_CHANGES',
-          appName: this.appName,
-          changes: this._paramChangeBuffer
-        });
-        this.logger.log("sendDeviceParameterChange: sent buffer", this._paramChangeBuffer);
-        this._paramChangeBuffer = [];
-        
-      }, 30);
+    if (this.isApplyingRemoteUpdate) return;
+
+    this._paramChangeBuffer.delete(param); // keep insertion order = order of the latest change
+    this._paramChangeBuffer.set(param, { param, value, normalizedValue });
+    if (this._paramFlushTimer) {
       this.logger.log("sendDeviceParameterChange: buffered change");
+      return;
     }
-    else {
-      this.logger.log("sendDeviceParameterChange, param=" + param, value, normalizedValue);
-      this.broadcast({
-        type: 'DEVICE_PARAMETER_CHANGE',
-        appName: this.appName,
-        param,
-        value,
-        normalizedValue
-      });
+    if (this.timing.paramBufferMs > 0) {
+      this._paramFlushTimer = setTimeout(() => this._flushParameterChanges(), this.timing.paramBufferMs);
+    } else {
+      this._flushParameterChanges();
     }
-    
-    this._lastParamChangeTime = performance.now();
+  }
+
+  _flushParameterChanges() {
+    if (this._paramFlushTimer) {
+      clearTimeout(this._paramFlushTimer);
+      this._paramFlushTimer = null;
+    }
+    const changes = [...this._paramChangeBuffer.values()];
+    this._paramChangeBuffer.clear();
+    if (changes.length === 1) {
+      this.logger.log("sendDeviceParameterChange, param=" + changes[0].param, changes[0].value, changes[0].normalizedValue);
+      this.broadcast({ type: 'DEVICE_PARAMETER_CHANGE', appName: this.appName, ...changes[0] });
+    } else if (changes.length > 1) {
+      this.logger.log("sendDeviceParameterChange: sent buffer", changes);
+      this.broadcast({ type: 'DEVICE_PARAMETER_CHANGES', appName: this.appName, changes });
+    }
+  }
+
+  _applyRemote(fn) {
+    const previous = this.isApplyingRemoteUpdate;
+    this.isApplyingRemoteUpdate = true;
+    try {
+      fn();
+    } finally {
+      this.isApplyingRemoteUpdate = previous;
+    }
   }
 
   sendMasterSettingUpdate(setting, value) {
-    
+    if (this.isApplyingRemoteUpdate) return;
+
     this.logger.log("sendMasterSettingUpdate, setting=" + setting, value);
     
     this.broadcast({
@@ -1076,9 +1381,9 @@ const JamConnectActions = {
 };
 
 class JamConnectClient {
-  constructor(appName, parentElement, enableLogging = false) {
+  constructor(appName, parentElement, enableLogging = false, connectorOptions = {}) {
     this._tone = Tone;
-    this._connector = new JamConnector(appName, this._tone, {enableLogging: enableLogging});
+    this._connector = new JamConnector(appName, this._tone, {...connectorOptions, enableLogging: enableLogging});
     this._parentElement = parentElement;
     this._userRole = null;
     this._isPlaying = false;
@@ -1111,6 +1416,9 @@ class JamConnectClient {
 
   get tone() { return this._tone; }
   get connector() { return this._connector; }
+  // Shared with the connector, which sets it while applying remote changes and skips send* calls meanwhile
+  get isApplyingRemoteUpdate() { return this._connector.isApplyingRemoteUpdate; }
+  set isApplyingRemoteUpdate(value) { this._connector.isApplyingRemoteUpdate = !!value; }
   get userRole() { return this._userRole; }
   get isPlaying() { return this._isPlaying; }
   get bpm() { return Tone.Transport.bpm.value; }
@@ -1440,8 +1748,17 @@ class JamConnectClient {
     if (peersListEl) {
       if (peers.length > 0) {
         peersListEl.style.display = 'flex';
-        peersListEl.innerHTML = `<span class="text-[10px] font-mono text-slate-400 uppercase mr-1">Connected:</span>` +
-          peers.map(p => `<span class="text-xs font-mono bg-emerald-950/80 text-emerald-300 border border-emerald-700/60 px-2 py-0.5 rounded">${p.name} (${p.rtt || 0}ms)</span>`).join('');
+        // Peer names come from remote peers: build text nodes, never HTML
+        const label = document.createElement('span');
+        label.className = 'text-[10px] font-mono text-slate-400 uppercase mr-1';
+        label.textContent = 'Connected:';
+        const chips = peers.map(p => {
+          const chip = document.createElement('span');
+          chip.className = 'text-xs font-mono bg-emerald-950/80 text-emerald-300 border border-emerald-700/60 px-2 py-0.5 rounded';
+          chip.textContent = `${jamCleanName(p.name, 'Jammer')} (${Math.round(Number(p.rtt) || 0)}ms)`;
+          return chip;
+        });
+        peersListEl.replaceChildren(label, ...chips);
       } else {
         peersListEl.style.display = 'none';
       }
@@ -1687,9 +2004,9 @@ class StartJamTransportAction extends JamAction {
 
   async _executeAction() {
     if (!this.client.userRole) {
-      Tone.Transport.start("+0.5");
+      Tone.Transport.start();
     } else {
-      this.client.connector.startTransport(this.client.bpm, "+0.5");
+      this.client.connector.startTransport(this.client.bpm);
     }
     this.client._isPlaying = true;
   }
