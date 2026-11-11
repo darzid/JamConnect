@@ -217,6 +217,7 @@ class JamConnector {
     this.onPeerDisconnected = null;    // (peerId, peersList)
     this.onConnectionStateChange = null; // (statusObj)
     this.onAuthError = null;           // (reason)
+    this.onNotePlayed = null;          // appName, instrument, note, velocity, duration, time
     this.onPadTriggered = null;        // (instrument, note, velocity, scheduledTime, extra)
     this.onPatternUpdated = null;      // (pattern, stepIndex, stepData)
     this.onPatternStepUpdated = null;  
@@ -886,7 +887,17 @@ class JamConnector {
         }
         break;
 
-      case 'PAD_PLAY': {
+      case 'PLAY_NOTE':
+        if (!this.permissions.syncMidi) return;
+        if (this.onNotePlayed) {
+          this.onNotePlayed(msg.appName, msg.instrument, msg.note, msg.velocity, msg.duration, msg.time);
+        }
+        if (this.isHost) {
+          this.broadcast(msg, senderId);
+        }
+        break;
+        
+      case 'PAD_PLAY':
         if (!this.permissions.syncMidi) return;
         // Remaining delay after the measured one-way transit from the sender
         const padDelayMs = Math.max(0, (msg.delayFromSendMs || 0) - this._rttFor(senderId) / 2);
@@ -1269,6 +1280,18 @@ class JamConnector {
     this.broadcast({
       type: 'MIDI_EVENT',
       event
+    });
+  }
+  
+  playNote(instrument, note, velocity, duration, time) {
+    this.broadcast({
+      type: 'PLAY_NOTE',
+      appName: this.appName,
+      instrument,
+      note,
+      velocity,
+      duration,
+      time
     });
   }
 
