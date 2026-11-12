@@ -31,7 +31,7 @@ const JAM_MESSAGE_TYPES = new Set([
   'AUTH_HELLO', 'AUTH_OK', 'AUTH_REJECTED', 'PING', 'PONG', 'CLOCK_SYNC', 'PEER_LIST',
   'PERMISSIONS_UPDATE', 'FULL_STATE_SYNC', 'TRANSPORT_STATE', 'TRANSPORT_HEARTBEAT',
   'PATTERN_STEP_UPDATE', 'PATTERN_FULL_UPDATE', 'DEVICE_PARAMETER_CHANGE', 'DEVICE_PARAMETER_CHANGES',
-  'MASTER_SETTING_UPDATE', 'PAD_PLAY', 'PLAY_NOTE', 'MIDI_EVENT'
+  'MASTER_SETTING_UPDATE', 'PAD_PLAY', 'PLAY_NOTE', 'MIDI_NOTE_ON', 'MIDI_NOTE_OFF', 'MIDI_CONTROL_CHANGE', 'MIDI_EVENT'
 ]);
 
 // Messages only the host may send; guests accept them only from the host connection
@@ -223,6 +223,9 @@ class JamConnector {
     this.onPatternStepUpdated = null;  
     this.onDeviceParameterChanged = null;   // (paramName, value, rawParams)
     this.onMasterSettingUpdated = null;  // (settingName, value)
+    this.onMidiNoteOn = null;             //(msg.appName, msg.channel, msg.note, msg.velocity, msg.time);
+    this.onMidiNoteOff = null;            // (msg.appName, msg.channel, msg.note, msg.time);
+    this.onMidiControlChange = null;      // (msg.appName, msg.channel, msg.controlNumber, msg.controlName, msg.value, msg.time);
     this.onMidiMessage = null;         // (midiEvent)
     this.onPermissionsUpdated = null;  // (permissions)
     this.getFullStateSnapshot = null;  // () => ({ pattern, params, bpm, swing, delayWet, isPlaying, step })
@@ -910,7 +913,36 @@ class JamConnector {
         }
         break;
       
+      case 'MIDI_NOTE_ON':
+        if (!this.permissions.syncMidi) return;
+        if (this.onMidiNoteOn) {
+          this.onMidiNoteOn(msg.appName, msg.channel, msg.note, msg.velocity, msg.time);
+        }
+        if (this.isHost) {
+          this.broadcast(msg, senderId);
+        }
+        break;
 
+      case 'MIDI_NOTE_OFF':
+        if (!this.permissions.syncMidi) return;
+        if (this.onMidiNoteOff) {
+          this.onMidiNoteOff(msg.appName, msg.channel, msg.note, msg.time);
+        }
+        if (this.isHost) {
+          this.broadcast(msg, senderId);
+        }
+        break;
+        
+      case 'MIDI_CONTROL_CHANGE':
+        if (!this.permissions.syncMidi) return;
+        if (this.onMidiControlChange) {
+          this.onMidiControlChange(msg.appName, msg.channel, msg.controlNumber, msg.controlName, msg.value, msg.time);
+        }
+        if (this.isHost) {
+          this.broadcast(msg, senderId);
+        }
+        break;
+        
       case 'MIDI_EVENT':
         if (!this.permissions.syncMidi) return;
         if (this.onMidiMessage) {
@@ -943,6 +975,9 @@ class JamConnector {
         return !!p.syncMasterSettings;
       case 'PAD_PLAY':
       case 'PLAY_NOTE':
+      case 'MIDI_NOTE_ON':
+      case 'MIDI_NOTE_OFF':
+      case 'MIDI_CONTROL_CHANGE':
       case 'MIDI_EVENT':
         return !!p.syncMidi;
       default:
@@ -1277,6 +1312,39 @@ class JamConnector {
     });
   }
 
+  sendMidiNoteOn(channel, note, velocity, time = this.Tone.now()) {
+    this.broadcast({
+      type: 'MIDI_NOTE_ON',
+      appName: this.appName,
+      channel,
+      note,
+      velocity,
+      time
+    });
+  }
+  
+  sendMidiNoteOff(channel, note, time = this.Tone.now()) {
+    this.broadcast({
+      type: 'MIDI_NOTE_OFF',
+      appName: this.appName,
+      channel,
+      note,
+      time
+    });
+  }
+  
+  sendMidiControlChange(channel, controlNumber, controlName, value, time = this.Tone.now()) {
+    this.broadcast({
+      type: 'MIDI_CONTROL_CHANGE',
+      appName: this.appName,
+      channel,
+      controlNumber,
+      controlName,
+      value,
+      time
+    });
+  }
+  
   sendMidiEvent(event) {
     this.broadcast({
       type: 'MIDI_EVENT',
