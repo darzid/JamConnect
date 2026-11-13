@@ -758,6 +758,8 @@ class JamConnector {
   }
 
   _measureMidiLatency(msg, senderId) {
+    if (!this.enableLogging) return;
+    
     let latencyMeasurement = { time: performance.now(), peer: this.peer, senderId: senderId, delta: performance.now() - msg.senderTime };
     this.midiLatencyLog.push(latencyMeasurement);
     
