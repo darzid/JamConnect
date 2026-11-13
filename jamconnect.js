@@ -144,6 +144,12 @@ function validateJamMessage(msg) {
         }
       }
       break;
+    case 'MIDI_NOTE_ON':
+    case 'MIDI_NOTE_OFF':
+    case 'MIDI_CONTROL_CHANGE':
+      // TODO
+      //if (!isNum('hostSendTime') || !isNum('guestReceiveTime')) return 'missing times';
+      break;
     case 'MASTER_SETTING_UPDATE':
       if (!isStr('setting') || !jamIsValidValue(msg.value)) return 'invalid setting';
       if (msg.setting === 'bpm' && isNum('value')) msg.value = jamClamp(msg.value, JAM_MESSAGE_LIMITS.bpm);
