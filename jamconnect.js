@@ -182,6 +182,11 @@ class JamConnector {
     this.logger = new Logger(this);
     this.enableLogging = options.enableLogging || false;
     this.logger.log("JamConnector: Logging = " + this.enableLogging);
+    this.midiLatencyLog = [];
+    this.midiLatencies = [];
+    this.minLatency = null;
+    this.maxLatency = null;
+    this.averageLatency = null;
     
     // Session credentials (only thing needed in QR code / URL link)
     this.sessionId = null;
@@ -752,6 +757,20 @@ class JamConnector {
     return msg;
   }
 
+  _measureMidiLatency(msg, senderId) {
+    let latencyMeasurement = { time: performance.now(), peer: this.peer, senderId: senderId, delta: performance.now() - msg.senderTime };
+    this.midiLatencyLog.push(latencyMeasurement);
+    
+    this.midiLatencies.push(latencyMeasurement.delta);
+    if (!this.minLatency || latencyMeasurement.delta < this.minLatency)
+      this.minLatency = latencyMeasurement.delta;
+    if (!this.maxLatency || latencyMeasurement.delta > this.maxLatency)
+      this.maxLatency = latencyMeasurement.delta;
+    this.averageLatency = (array) => this.midiLatencies.reduce((sum, currentValue) => sum + currentValue, 0) / this.midiLatencies.length;
+    
+    this.logger.log(`Midi message latency: count=${this.midiLatencies.length}, min=${this.minLatency}, max=${this.maxLatency}, avg=${this.averageLatency}`);
+  }
+  
   _routeMessage(msg, senderId) {
     if (!msg || !msg.type) return;
 
@@ -921,6 +940,9 @@ class JamConnector {
       
       case 'MIDI_NOTE_ON':
         if (!this.permissions.syncMidi) return;
+        
+        this._measureMidiLatency(msg, senderId);
+        
         if (this.onMidiNoteOn) {
           this.onMidiNoteOn(msg.appName, msg.channel, msg.note, msg.velocity, msg.time);
         }
@@ -931,6 +953,9 @@ class JamConnector {
 
       case 'MIDI_NOTE_OFF':
         if (!this.permissions.syncMidi) return;
+        
+        this._measureMidiLatency(msg, senderId);
+        
         if (this.onMidiNoteOff) {
           this.onMidiNoteOff(msg.appName, msg.channel, msg.note, msg.time);
         }
@@ -941,6 +966,9 @@ class JamConnector {
         
       case 'MIDI_CONTROL_CHANGE':
         if (!this.permissions.syncMidi) return;
+        
+        this._measureMidiLatency(msg, senderId);
+        
         if (this.onMidiControlChange) {
           this.onMidiControlChange(msg.appName, msg.channel, msg.controlNumber, msg.controlName, msg.value, msg.time);
         }
@@ -1325,7 +1353,8 @@ class JamConnector {
       channel,
       note,
       velocity,
-      time
+      time,
+      senderTime: performance.now()
     });
   }
   
@@ -1335,7 +1364,8 @@ class JamConnector {
       appName: this.appName,
       channel,
       note,
-      time
+      time,
+      senderTime: performance.now()
     });
   }
   
@@ -1347,7 +1377,8 @@ class JamConnector {
       controlNumber,
       controlName,
       value,
-      time
+      time,
+      senderTime: performance.now()
     });
   }
   
