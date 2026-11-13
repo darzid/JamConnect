@@ -16,7 +16,14 @@
 		jc.playNote("tb303", "C3", 1, "16n", 0);
 		console.log("note played");
 		
-		let jcClient = new JamConnectClient("jam303", "jamconnect", true);
+		jc.sendMidiNoteOn(1, "C#3", 127);
+		jc.sendMidiNoteOff(1, "C#3");
+		console.log("sent midi noteOn + noteOff");
+		
+		jc.sendMidiControlChange(1, 74, "cutoff", 100);
+		console.log("sent midi control change");
+		
+		let jcClient = new JamConnectClient("jam303", document.getElementById("jamconnect"), true);
    
 	</script></body>
 
